@@ -167,7 +167,12 @@ enum Cmd {
 }
 
 /// A hello (no session yet) or a line for a session.
-async fn post(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: String) -> Response {
+async fn post(
+    State(shared): State<Arc<Shared>>,
+    uri: Uri,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
     if headers.contains_key(SESSION) {
         let mut map = shared.sessions.lock().unwrap();
         return match authorize(&mut map, &headers) {
@@ -196,6 +201,8 @@ async fn post(State(shared): State<Arc<Shared>>, headers: HeaderMap, body: Strin
     let _ = cmds.send(Cmd::Input(body));
     tokio::spawn((shared.start)(Session {
         key,
+        origin: format!("hyperb://{}", host(&uri, &headers)),
+        path: uri.path().to_owned(),
         input: input_rx,
         output,
     }));
@@ -256,11 +263,7 @@ async fn stream(State(shared): State<Arc<Shared>>, uri: Uri, headers: HeaderMap)
     let wants_events = header_str(&headers, header::ACCEPT.as_str())
         .is_some_and(|a| a.contains("text/event-stream"));
     if !wants_events {
-        // HTTP/2 has no Host header, only the authority of the URI.
-        let host = header_str(&headers, header::HOST.as_str())
-            .or(uri.authority().map(|a| a.as_str()))
-            .unwrap_or("localhost");
-        return Html(page(&shared.name, host, uri.path())).into_response();
+        return Html(page(&shared.name, host(&uri, &headers), uri.path())).into_response();
     }
     let mut map = shared.sessions.lock().unwrap();
     let s = match authorize(&mut map, &headers) {
@@ -352,6 +355,14 @@ fn percent(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+/// The host the request was sent to, with its port if it had one.
+fn host<'a>(uri: &'a Uri, headers: &'a HeaderMap) -> &'a str {
+    // HTTP/2 has no Host header, only the authority of the URI.
+    header_str(headers, header::HOST.as_str())
+        .or(uri.authority().map(|a| a.as_str()))
+        .unwrap_or("localhost")
 }
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {

@@ -25,6 +25,12 @@ use tokio::sync::mpsc;
 pub struct Session {
     /// The caller's key, proven by the transport.
     pub key: PublicKey,
+    /// The address the caller dialed, without its path:
+    /// `hyperb://<host>[:port]` or `hyperb://<endpoint id>`.
+    pub origin: String,
+    /// The path of the address, starting with `/`. Over iroh, which serves
+    /// the root ALPN only, it is always `/`.
+    pub path: String,
     /// The lines from the renderer, without their line feeds, starting with
     /// the `hello`. It ends when the caller hangs up.
     pub input: mpsc::UnboundedReceiver<String>,

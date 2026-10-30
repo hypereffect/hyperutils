@@ -1,0 +1,20 @@
+[package]
+name = "forms"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+description = "Forms for hyperb: build one, share its link, collect answers until it expires"
+
+[dependencies]
+hyperserve.workspace = true
+hyperb-core.workspace = true
+hypereffect.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal"] }
+clap.workspace = true
+serde.workspace = true
+orangedb.workspace = true
+cuid2 = "0.1"
+
+[dev-dependencies]
+hypereffect = { workspace = true, features = ["client"] }
+tempfile = "3"

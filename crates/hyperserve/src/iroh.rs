@@ -29,13 +29,14 @@ where
         .bind()
         .await
         .map_err(|e| e.to_string())?;
-    println!("{name} answers at hyperb://{}", identity.public());
+    let origin = format!("hyperb://{}", identity.public());
+    println!("{name} answers at {origin}");
     endpoint.online().await;
     println!("{name} is online over iroh");
     while let Some(incoming) = endpoint.accept().await {
-        let service = service.clone();
+        let (service, origin) = (service.clone(), origin.clone());
         tokio::spawn(async move {
-            if let Err(e) = session(incoming, service).await {
+            if let Err(e) = session(incoming, origin, service).await {
                 eprintln!("iroh session: {e}");
             }
         });
@@ -43,7 +44,7 @@ where
     Ok(())
 }
 
-async fn session<F, Fut>(incoming: Incoming, service: F) -> Result<(), String>
+async fn session<F, Fut>(incoming: Incoming, origin: String, service: F) -> Result<(), String>
 where
     F: Fn(Session) -> Fut,
     Fut: Future<Output = ()> + Send + 'static,
@@ -63,6 +64,8 @@ where
     let (output, mut output_rx) = mpsc::unbounded_channel::<String>();
     tokio::spawn(service(Session {
         key,
+        origin,
+        path: "/".into(),
         input: input_rx,
         output,
     }));

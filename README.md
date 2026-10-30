@@ -10,6 +10,7 @@ their public key, which the transport proves, so there are no logins.
 | ------------ | ----------------------------------------------------------------------------------- | ---------------- |
 | `hyperbbs`   | An old-school bulletin board: message boards, mail, teleconference. Also on iroh.   | `127.0.0.1:8401` |
 | `meet`       | A Doodle-style scheduler. Share a code, mark the times that suit you, see answers live. | `127.0.0.1:8402` |
+| `forms`      | A form builder. Share `/<id>`, collect answers, read them at `/<id>/results`. Forms expire after 1 day to 1 month. | `127.0.0.1:8403` |
 | `hyperserve` | The library they share: the HTTP(S) and iroh transports, and `run_app`.             |                  |
 
 ## Running
@@ -37,6 +38,10 @@ hyperserve::http::serve("name", listen, &tls, |session| {
     hyperserve::run_app(session, app)
 })
 ```
+
+`session.path` is the path of the address the caller opened, and
+`session.origin` is `hyperb://<host>[:port]` as they dialed it, so an app can
+route on its path and write links to itself (see `crates/forms`).
 
 A server that also needs to react to things outside the session (as the BBS
 does with its shared events) can read `session.input` and write

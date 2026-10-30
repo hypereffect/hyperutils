@@ -60,15 +60,16 @@ mod tests {
     use hypereffect::{Action, json};
     use std::collections::BTreeMap;
 
-    /// Greets the caller by key and counts their presses.
+    /// Greets the caller by key and address, and counts their presses.
     struct Counter {
         key: PublicKey,
+        at: String,
         n: u32,
     }
 
     impl App for Counter {
         fn hello(&mut self, out: &mut Outbox, _: &BTreeMap<String, String>) {
-            out.signal(json!({"key": self.key.to_string(), "n": self.n}));
+            out.signal(json!({"key": self.key.to_string(), "at": self.at, "n": self.n}));
         }
 
         fn action(&mut self, out: &mut Outbox, _: &Action) {
@@ -83,7 +84,12 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             http::serve_on("counter", listener, &Tls::default(), |s| {
-                let app = Counter { key: s.key, n: 0 };
+                let at = format!("{}{}", s.origin, s.path);
+                let app = Counter {
+                    key: s.key,
+                    at,
+                    n: 0,
+                };
                 run_app(s, app)
             })
             .await
@@ -105,7 +111,9 @@ mod tests {
         let key = me.public().to_string();
         assert_eq!(
             next().await,
-            Event::Data(format!("signal {{\"key\":\"{key}\",\"n\":0}}\n"))
+            Event::Data(format!(
+                "signal {{\"key\":\"{key}\",\"at\":\"hyperb://127.0.0.1:{port}/any/path\",\"n\":0}}\n"
+            ))
         );
         conn.send("action {\"name\":\"press\"}\n".into());
         assert_eq!(next().await, Event::Data("signal {\"n\":1}\n".into()));
