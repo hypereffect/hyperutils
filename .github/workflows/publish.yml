@@ -1,0 +1,175 @@
+name: publish
+
+# Builds every binary crate in the workspace as a static musl executable and
+# attaches them to the GitHub release for the pushed tag.
+#
+# Nothing here names a crate: the matrix comes from `cargo metadata`, so a new
+# crate under `crates/` with a `[[bin]]` (or `src/main.rs`) is picked up on the
+# next tag with no workflow change. Crates without a binary (`hyperserve`) are
+# skipped automatically.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+
+on:
+  push:
+    tags: ["v*"]
+  # Manual run: builds and uploads run artifacts, but makes no release.
+  workflow_dispatch:
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  # `hyperb-core` is a path dependency on `../hyperb/crates/core`, so the hyperb
+  # repository has to be cloned next to this checkout. Point these at wherever
+  # hyperb lives; a private repo also needs a `HYPERB_TOKEN` secret with read
+  # access to it.
+  HYPERB_REPO: ${{ vars.HYPERB_REPO || format('{0}/hyperb', github.repository_owner) }}
+  HYPERB_REF: ${{ vars.HYPERB_REF || 'main' }}
+  # One artifact per entry. Native runners per architecture: no cross toolchain,
+  # and C dependencies (ring, and whatever comes next) build with the target's
+  # own musl-gcc. Override the whole list with a `TARGETS` repository variable
+  # (same JSON shape) if a runner or triple needs to change.
+  TARGETS: |
+    [
+      {"target": "x86_64-unknown-linux-musl",  "os": "ubuntu-latest"},
+      {"target": "aarch64-unknown-linux-musl", "os": "ubuntu-24.04-arm"}
+    ]
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out hyperb (path dependency)
+        env:
+          GH_TOKEN: ${{ secrets.HYPERB_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$HYPERB_REF" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${HYPERB_REPO}.git" ../hyperb
+
+      - name: Work out what to build
+        id: plan
+        env:
+          TARGETS_OVERRIDE: ${{ vars.TARGETS }}
+        run: |
+          set -euo pipefail
+          targets=${TARGETS_OVERRIDE:-$TARGETS}
+          crates=$(cargo metadata --format-version 1 --no-deps --locked |
+            jq -c '[.packages[]
+                    | {crate: .name, version,
+                       bins: [.targets[] | select(.kind | index("bin")) | .name]}
+                    | select(.bins | length > 0)]')
+          echo "binary crates: $crates"
+
+          matrix=$(jq -c --argjson targets "$targets" \
+            '{include: [ .[] as $crate
+                       | $crate.bins[] as $bin
+                       | $targets[] as $target
+                       | {crate: $crate.crate, version: $crate.version, bin: $bin,
+                          target: $target.target, os: $target.os} ]}' <<<"$crates")
+          echo "matrix: $matrix"
+
+          test "$(jq '.include | length' <<<"$matrix")" -gt 0 ||
+            { echo "no binary crates in workspace" >&2; exit 1; }
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.bin }} ${{ matrix.target }}
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out hyperb (path dependency)
+        env:
+          GH_TOKEN: ${{ secrets.HYPERB_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$HYPERB_REF" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${HYPERB_REPO}.git" ../hyperb
+
+      # musl-gcc for the C parts; the `cc` crate picks it up for musl targets.
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        env:
+          RUSTFLAGS: -C strip=symbols
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target "${{ matrix.target }}" \
+            -p "${{ matrix.crate }}" --bin "${{ matrix.bin }}"
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="${{ matrix.bin }}-v${{ matrix.version }}-${{ matrix.target }}"
+          mkdir -p dist
+          install -m 755 "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/$name"
+          file "dist/$name"
+          ldd "dist/$name" 2>&1 || true
+          if file "dist/$name" | grep -q 'dynamically linked'; then
+            echo "::error::$name is not statically linked"
+            exit 1
+          fi
+          ( cd dist && sha256sum "$name" > "$name.sha256" )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.bin }}-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: [plan, build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ( cd dist && cat ./*.sha256 > SHA256SUMS )
+          ls -l dist
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "$TAG" --generate-notes
+          fi

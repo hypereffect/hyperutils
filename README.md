@@ -44,3 +44,24 @@ does with its shared events) can read `session.input` and write
 
 `hyperb-core` is a path dependency on `../hyperb`, so that repository has to
 be checked out next to this one.
+
+## Releases
+
+Tag to publish:
+
+```
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+`.github/workflows/publish.yml` then builds every binary crate in the workspace
+as a static musl executable (`x86_64-unknown-linux-musl`,
+`aarch64-unknown-linux-musl`) and attaches `hyperbbs-v0.1.0-<target>`, its
+`.sha256`, and a combined `SHA256SUMS` to the release. Nothing lists the crates
+by hand — the matrix comes from `cargo metadata`, so a new crate under `crates/`
+ships with the next tag. The library crate (`hyperserve`) has no binary and is
+skipped.
+
+CI clones hyperb into `../hyperb` from `<owner>/hyperb` on `main`; override with
+the `HYPERB_REPO` / `HYPERB_REF` repository variables, and set a `HYPERB_TOKEN`
+secret if that repository is private. A manual `workflow_dispatch` run builds
+the same binaries as run artifacts, without a release.
