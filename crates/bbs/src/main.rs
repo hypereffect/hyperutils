@@ -1,9 +1,9 @@
-//! hyperbbs: an old-school bulletin board system whose screens are
+//! bbs: an old-school bulletin board system whose screens are
 //! [hypereffect](https://crates.io/crates/hypereffect) components, served
 //! to [hyperb](../../hyperb) renderers over HTTPS and iroh.
 //!
 //! ```text
-//! cargo run --release -p hyperbbs -- [--data DIR] [--name NAME] [--nodes N] [--sysop KEY]...
+//! cargo run --release -p bbs -- [--data DIR] [--name NAME] [--nodes N] [--sysop KEY]...
 //!     [--listen ADDR] [--tls-cert PEM --tls-key PEM] [--no-iroh]
 //! ```
 //!
@@ -30,8 +30,8 @@ use std::path::PathBuf;
 #[command(version, about)]
 struct Args {
     /// Where the server key, the database and banner.txt live. Defaults to
-    /// $XDG_DATA_HOME/hyperbbs (or ~/.local/share/hyperbbs).
-    #[arg(long, env = "HYPERBBS_DATA")]
+    /// $XDG_DATA_HOME/bbs (or ~/.local/share/bbs).
+    #[arg(long, env = "BBS_DATA")]
     data: Option<PathBuf>,
     /// The board's name.
     #[arg(long, default_value = "hyperbbs")]
@@ -43,7 +43,7 @@ struct Args {
     #[arg(long = "sysop", value_name = "KEY")]
     sysops: Vec<String>,
     /// The address to answer HTTP(S) callers on.
-    #[arg(long, env = "HYPERBBS_LISTEN", default_value = "127.0.0.1:8401")]
+    #[arg(long, env = "BBS_LISTEN", default_value = "127.0.0.1:8401")]
     listen: SocketAddr,
     #[command(flatten)]
     tls: Tls,
@@ -55,7 +55,7 @@ struct Args {
 #[tokio::main]
 async fn main() {
     if let Err(e) = run(Args::parse()).await {
-        eprintln!("hyperbbs: {e}");
+        eprintln!("bbs: {e}");
         std::process::exit(1);
     }
 }
@@ -114,5 +114,5 @@ fn default_data() -> Option<PathBuf> {
             .map(PathBuf::from)
     };
     let base = var("XDG_DATA_HOME").or_else(|| var("HOME").map(|h| h.join(".local/share")))?;
-    Some(base.join("hyperbbs"))
+    Some(base.join("bbs"))
 }

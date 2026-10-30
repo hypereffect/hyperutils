@@ -1,5 +1,5 @@
 [package]
-name = "hyperbbs"
+name = "bbs"
 version.workspace = true
 edition = "2021"
 license.workspace = true

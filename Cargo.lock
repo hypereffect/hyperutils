@@ -306,6 +306,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bbs"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "hyperb-core",
+ "hypereffect",
+ "hyperserve",
+ "orangedb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1480,22 +1496,6 @@ dependencies = [
  "tokio",
  "url",
  "wasm-bindgen-futures",
-]
-
-[[package]]
-name = "hyperbbs"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "clap",
- "hyperb-core",
- "hypereffect",
- "hyperserve",
- "orangedb",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
 ]
 
 [[package]]

@@ -8,7 +8,7 @@ their public key, which the transport proves, so there are no logins.
 
 | Crate        | What it is                                                                          | Default listen   |
 | ------------ | ----------------------------------------------------------------------------------- | ---------------- |
-| `hyperbbs`   | An old-school bulletin board: message boards, mail, teleconference. Also on iroh.   | `127.0.0.1:8401` |
+| `bbs`        | An old-school bulletin board: message boards, mail, teleconference. Also on iroh.   | `127.0.0.1:8401` |
 | `meet`       | A Doodle-style scheduler. Share a code, mark the times that suit you, see answers live. | `127.0.0.1:8402` |
 | `forms`      | A form builder. Share `/<id>`, collect answers, read them at `/<id>/results`. Forms expire after 1 day to 1 month. | `127.0.0.1:8403` |
 | `hyperserve` | The library they share: the HTTP(S) and iroh transports, and `run_app`.             |                  |
@@ -45,7 +45,7 @@ route on its path and write links to itself (see `crates/forms`).
 
 A server that also needs to react to things outside the session (as the BBS
 does with its shared events) can read `session.input` and write
-`session.output` directly. See `crates/hyperbbs/src/session.rs`.
+`session.output` directly. See `crates/bbs/src/session.rs`.
 
 `hyperb-core` is a path dependency on `../hyperb`, so that repository has to
 be checked out next to this one.
@@ -60,7 +60,7 @@ git tag v0.1.0 && git push origin v0.1.0
 
 `.github/workflows/publish.yml` then builds every binary crate in the workspace
 as a static musl executable (`x86_64-unknown-linux-musl`,
-`aarch64-unknown-linux-musl`) and attaches `hyperbbs-v0.1.0-<target>`, its
+`aarch64-unknown-linux-musl`) and attaches `bbs-v0.1.0-<target>`, its
 `.sha256`, and a combined `SHA256SUMS` to the release. Nothing lists the crates
 by hand — the matrix comes from `cargo metadata`, so a new crate under `crates/`
 ships with the next tag. The library crate (`hyperserve`) has no binary and is
