@@ -1,0 +1,17 @@
+[package]
+name = "meet"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+description = "A Doodle-style scheduler for hyperb: candidate times, a short code to share, live answers"
+
+[dependencies]
+hyperserve.workspace = true
+hyperb-core.workspace = true
+hypereffect.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal"] }
+clap.workspace = true
+getrandom = "0.2"
+
+[dev-dependencies]
+hypereffect = { workspace = true, features = ["client"] }

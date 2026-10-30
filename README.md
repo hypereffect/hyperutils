@@ -1,0 +1,46 @@
+# hyperutils
+
+Small servers that each offer one useful service as a
+[hypereffect](https://crates.io/crates/hypereffect) app, for the
+[hyperb](../hyperb) browser. Each one is its own crate under `crates/`, and
+they all answer at `hyperb://<host>` over HTTPS. Callers are recognized by
+their public key, which the transport proves, so there are no logins.
+
+| Crate        | What it is                                                                          | Default listen   |
+| ------------ | ----------------------------------------------------------------------------------- | ---------------- |
+| `hyperbbs`   | An old-school bulletin board: message boards, mail, teleconference. Also on iroh.   | `127.0.0.1:8401` |
+| `meet`       | A Doodle-style scheduler. Share a code, mark the times that suit you, see answers live. | `127.0.0.1:8402` |
+| `hyperserve` | The library they share: the HTTP(S) and iroh transports, and `run_app`.             |                  |
+
+## Running
+
+```
+cargo run --release -p meet -- --listen 0.0.0.0:443 --tls-cert fullchain.pem --tls-key privkey.pem
+```
+
+Renderers use `https` for every host except `localhost` and IP addresses. So a
+public server either gets `--tls-cert` and `--tls-key`, or runs on plain HTTP
+behind a proxy that terminates TLS. The certificate is read again every 12
+hours, so renewals take effect without a restart. Opening the address in a web
+browser shows a page that links to it in hyperb.
+
+`--help` on each binary lists its other options.
+
+## Adding a server
+
+Make a new crate under `crates/` that depends on `hyperserve`. Write the app
+as a `hypereffect::App`, build it from the caller's key, and serve it:
+
+```rust
+hyperserve::http::serve("name", listen, &tls, |session| {
+    let app = MyApp::new(session.key);
+    hyperserve::run_app(session, app)
+})
+```
+
+A server that also needs to react to things outside the session (as the BBS
+does with its shared events) can read `session.input` and write
+`session.output` directly. See `crates/hyperbbs/src/session.rs`.
+
+`hyperb-core` is a path dependency on `../hyperb`, so that repository has to
+be checked out next to this one.

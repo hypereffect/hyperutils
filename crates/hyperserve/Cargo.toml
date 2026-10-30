@@ -1,0 +1,27 @@
+[package]
+name = "hyperserve"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+description = "The hyperb transports the hyperutils servers share: HTTP(S) with Server-Sent Events, and iroh"
+
+[dependencies]
+hyperb-core.workspace = true
+hypereffect.workspace = true
+axum = "0.8"
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tower-http = { version = "0.6", features = ["cors"] }
+iroh = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+clap.workspace = true
+getrandom = "0.2"
+hex = "0.4"
+
+[features]
+default = []
+iroh = ["dep:iroh"]
+
+[dev-dependencies]
+hyperb-core = { workspace = true, features = ["net"] }
