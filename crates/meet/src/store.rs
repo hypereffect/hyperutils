@@ -1,58 +1,87 @@
-//! In-memory profiles, keyed by the renderer's public key. Sessions end when
-//! their event stream closes, but a profile stays for [`IDLE_TTL`] since its
-//! last use, so a returning visitor with the same key is recognized again.
+//! The meetings, their answers and what is remembered about each person, in
+//! an [orangedb] database. People are keyed by the hex of the renderer's
+//! public key. A person stays for [`IDLE_TTL`] since their last visit, so a
+//! returning visitor with the same key is recognized again.
+//!
+//! A storage error is nothing a visitor can fix, so [`read`] and [`write`]
+//! panic on one: that ends the session it happened in, which runs in its own
+//! task, and nothing else.
 
-use hyperb_core::identity::PublicKey;
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// How long a profile survives without activity.
+pub use schema::*;
+
+/// How long a person is remembered without a visit.
 pub const IDLE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
-struct Entry<T> {
-    value: T,
-    seen: Instant,
-}
+#[orangedb::schema]
+pub mod schema {
+    #[entity]
+    #[derive(Clone, Debug)]
+    pub struct Meeting {
+        #[id(String)]
+        pub code: Code,
+        pub name: String,
+        pub description: String,
+        /// The organizer's key.
+        pub owner: String,
+        pub owner_name: String,
+        pub options: Vec<String>,
+        pub closed: bool,
+        /// Bumped on every change, so that watchers know to refresh.
+        pub version: u64,
+        /// When it last changed, in seconds since the epoch.
+        pub touched: u64,
+    }
 
-/// A map from keys to remembered values, thread-safe, with idle expiry.
-pub struct Memory<T>(Mutex<HashMap<PublicKey, Entry<T>>>);
+    /// One person's answer to a meeting; a meeting lists them in the order
+    /// they first came.
+    #[entity]
+    #[derive(Clone, Debug)]
+    pub struct Answer {
+        #[id(auto)]
+        pub id: AnswerId,
+        #[references(Meeting, on_delete = cascade)]
+        pub meeting: Code,
+        pub key: String,
+        pub name: String,
+        pub picks: Vec<bool>,
+        pub other: String,
+    }
 
-impl<T> Default for Memory<T> {
-    fn default() -> Self {
-        Memory(Mutex::new(HashMap::new()))
+    #[entity(accessor = people)]
+    #[derive(Clone, Debug)]
+    pub struct Person {
+        #[id(String)]
+        pub key: PersonKey,
+        /// The name last used.
+        pub name: String,
+        /// Meetings they created or answered, newest first. A deleted
+        /// meeting leaves the list by itself.
+        #[references(Meeting, on_delete = set_null)]
+        pub meetings: Vec<Code>,
+        /// When they were last here, in seconds since the epoch.
+        pub seen: u64,
     }
 }
 
-impl<T: Default> Memory<T> {
-    /// A new, empty memory.
-    pub fn new() -> Self {
-        Memory(Mutex::new(HashMap::new()))
-    }
-
-    /// Drops entries idle longer than [`IDLE_TTL`].
-    pub fn prune(&self) {
-        let mut map = self.0.lock().unwrap();
-        let cutoff = Instant::now() - IDLE_TTL;
-        map.retain(|_, e| e.seen > cutoff);
-    }
-
-    /// Runs `f` with the entry for `key`, creating it first if needed, and
-    /// refreshes the entry's idle timer. Returns `f`'s result.
-    pub fn update<R>(&self, key: &PublicKey, f: impl FnOnce(&mut T) -> R) -> R {
-        let mut map = self.0.lock().unwrap();
-        let entry = map.entry(*key).or_insert_with(|| Entry {
-            value: T::default(),
-            seen: Instant::now(),
-        });
-        entry.seen = Instant::now();
-        f(&mut entry.value)
-    }
+pub fn read<R>(db: &Db, f: impl FnOnce(&ReadTx) -> orangedb::Result<R>) -> R {
+    db.read(f).unwrap_or_else(|e| panic!("database: {e}"))
 }
 
-impl<T: Default + Clone> Memory<T> {
-    /// A snapshot of the profile for `key`, or the default if unknown.
-    pub fn snapshot(&self, key: &PublicKey) -> T {
-        self.update(key, |p| p.clone())
-    }
+pub fn write<R>(db: &Db, f: impl FnOnce(&WriteTx) -> orangedb::Result<R>) -> R {
+    db.write(f).unwrap_or_else(|e| panic!("database: {e}"))
+}
+
+/// Seconds since the epoch.
+pub fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Whether something last touched at `at` has been idle for `ttl`.
+pub fn expired(at: u64, ttl: Duration) -> bool {
+    now().saturating_sub(at) >= ttl.as_secs()
 }

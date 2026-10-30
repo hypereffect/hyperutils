@@ -3,6 +3,7 @@
 //! drive a [`Bbs`].
 
 use crate::bbs::Bbs;
+use crate::db::UserKey;
 use crate::hub::Hub;
 use hypereffect::{Outbox, RendererMessage};
 use hyperserve::Session;
@@ -16,7 +17,7 @@ const HANGUP_DELAY: Duration = Duration::from_secs(2);
 pub async fn run(hub: Arc<Hub>, mut session: Session) {
     // Subscribe first, so nothing that happens after the hello is missed.
     let mut events = hub.subscribe();
-    let mut bbs = Bbs::new(hub, session.key.to_string());
+    let mut bbs = Bbs::new(hub, UserKey::new(session.key.to_string()));
     let mut out = Outbox::new();
     let mut clock = tokio::time::interval(Duration::from_secs(1));
     loop {

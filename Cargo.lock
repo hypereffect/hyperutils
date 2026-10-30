@@ -1426,8 +1426,10 @@ dependencies = [
  "hyperb-core",
  "hypereffect",
  "hyperserve",
+ "orangedb",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -2009,6 +2011,8 @@ dependencies = [
  "hyperb-core",
  "hypereffect",
  "hyperserve",
+ "orangedb",
+ "tempfile",
  "tokio",
 ]
 
@@ -2589,6 +2593,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "orangedb"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0acf9d31b41ceb3fdda71f7111330964dc9a4db2922de0c0a9867ba7fadd4f50"
+dependencies = [
+ "orangedb-macros",
+ "postcard",
+ "redb",
+ "serde",
+ "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "orangedb-macros"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef38c5603cc36508f6ddb8eb7ec346174d8d936ba2044708f354422766357b32"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "papaya"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2893,6 +2922,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "redb"
+version = "4.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39178e0a867f9e3eaa6292a4ab1dd3613f2519c5b564341e1e7b29b270736cc4"
+dependencies = [
+ "libc",
+ "uuid",
 ]
 
 [[package]]
@@ -3951,7 +3990,9 @@ version = "1.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cc1186384beb7dd8eedea376413fd654937285ea6c9cfbb928dc3043ea4b606"
 dependencies = [
+ "getrandom 0.4.3",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

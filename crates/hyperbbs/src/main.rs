@@ -13,7 +13,7 @@
 //! becomes the sysop.
 //!
 //! The data directory holds the server's key (`identity`), the database
-//! (`bbs.json`) and, if the sysop wants their own login art, `banner.txt`.
+//! (`bbs.redb`) and, if the sysop wants their own login art, `banner.txt`.
 
 mod bbs;
 mod db;
@@ -73,7 +73,7 @@ async fn run(args: Args) -> Result<(), String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("--sysop: {e}"))?;
     let identity = Identity::load_or_create(&data.join("identity")).map_err(|e| e.to_string())?;
-    let store = db::Store::open(&data.join("bbs.json"))?;
+    let store = db::Store::open(&data.join("bbs.redb"))?;
     let banner = std::fs::read_to_string(data.join("banner.txt"))
         .map(|b| b.trim_end().to_owned())
         .unwrap_or_else(|_| bbs::default_banner(&args.name));
@@ -88,8 +88,6 @@ async fn run(args: Args) -> Result<(), String> {
     );
     println!("data in {}", data.display());
 
-    let saver = hub.clone();
-    tokio::spawn(async move { saver.store.keep_saved().await });
     let service = {
         let hub = hub.clone();
         move |s| session::run(hub.clone(), s)
@@ -106,7 +104,7 @@ async fn run(args: Args) -> Result<(), String> {
         r = iroh => r?,
         _ = tokio::signal::ctrl_c() => println!("shutting down"),
     }
-    hub.store.save().map_err(|e| format!("saving: {e}"))
+    Ok(())
 }
 
 fn default_data() -> Option<PathBuf> {

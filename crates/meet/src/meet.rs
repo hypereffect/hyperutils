@@ -8,23 +8,17 @@
 //! back with the same key, and only the key that created a meeting can close
 //! or delete it.
 //!
-//! Meetings live in memory, shared by all sessions, and are forgotten
+//! Meetings live in the database, shared by all sessions, and are forgotten
 //! [`MEETING_TTL`] after their last change. A session watches the meeting it
 //! has open on its tick, so answers from other people show up within a second
 //! or two.
 
-use crate::store;
+use crate::store::{self, Answer, Code, Db, Meeting, Person, PersonKey, WriteTx};
 use hyperb_core::identity::PublicKey;
 use hypereffect::{Action, App, Element, Handler, Map, Metadata, Outbox, Value, cel, json, ui};
 use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
-
-/// Meetings by code.
-static MEETINGS: LazyLock<Mutex<HashMap<String, Meeting>>> = LazyLock::new(Default::default);
-/// What is remembered about each key: the name last used, the meetings seen.
-static PEOPLE: LazyLock<store::Memory<Person>> = LazyLock::new(store::Memory::new);
+use std::sync::Arc;
+use std::time::Duration;
 
 /// How long a meeting lives after its last change.
 pub const MEETING_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -38,60 +32,42 @@ const MAX_NOTE_LEN: usize = 120;
 const MAX_REMEMBERED: usize = 10;
 const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
-/// Drops forgotten people and old meetings.
-pub fn prune() {
-    PEOPLE.prune();
-    MEETINGS
-        .lock()
-        .unwrap()
-        .retain(|_, m| m.touched.elapsed() < MEETING_TTL);
-}
-
-#[derive(Clone, Default)]
-struct Person {
-    name: String,
-    /// Codes of meetings they created or answered, newest first.
-    codes: Vec<String>,
-}
-
-#[derive(Clone)]
-struct Meeting {
-    name: String,
-    description: String,
-    owner: PublicKey,
-    owner_name: String,
-    options: Vec<String>,
-    answers: Vec<(PublicKey, Answer)>,
-    closed: bool,
-    /// Bumped on every change, so that watchers know to refresh.
-    version: u64,
-    touched: Instant,
-}
-
-#[derive(Clone)]
-struct Answer {
-    name: String,
-    picks: Vec<bool>,
-    other: String,
+/// Drops forgotten people and old meetings, with their answers.
+pub fn prune(db: &Db) {
+    store::write(db, |tx| {
+        for m in tx.meetings().all()? {
+            if store::expired(m.touched, MEETING_TTL) {
+                tx.meetings().delete(&m.code)?;
+            }
+        }
+        for p in tx.people().all()? {
+            if store::expired(p.seen, store::IDLE_TTL) {
+                tx.people().delete(&p.key)?;
+            }
+        }
+        Ok(())
+    });
 }
 
 impl Meeting {
     fn changed(&mut self) {
         self.version += 1;
-        self.touched = Instant::now();
+        self.touched = store::now();
     }
 }
 
-fn new_code(taken: &HashMap<String, Meeting>) -> String {
+fn new_code(tx: &WriteTx) -> orangedb::Result<Code> {
     loop {
         let mut bytes = [0u8; 6];
         getrandom::getrandom(&mut bytes).expect("system random number generator");
-        let code: String = bytes
-            .iter()
-            .map(|b| CODE_ALPHABET[*b as usize % CODE_ALPHABET.len()] as char)
-            .collect();
-        if !taken.contains_key(&code) {
-            return code;
+        let code = Code::new(
+            bytes
+                .iter()
+                .map(|b| CODE_ALPHABET[*b as usize % CODE_ALPHABET.len()] as char)
+                .collect::<String>(),
+        );
+        if !tx.meetings().contains(&code)? {
+            return Ok(code);
         }
     }
 }
@@ -120,22 +96,45 @@ fn feedback(kind: &str, text: impl Into<String>) -> Value {
 }
 
 /// Remembers that `key` took part in `code`.
-fn remember(key: &PublicKey, code: &str, name: Option<&str>) {
-    PEOPLE.update(key, |p| {
+fn remember(db: &Db, key: &PublicKey, code: &Code, name: Option<&str>) {
+    store::write(db, |tx| {
+        let id = PersonKey::new(key.to_string());
+        let mut p = tx.people().get(&id)?.unwrap_or_else(|| Person {
+            key: id,
+            name: String::new(),
+            meetings: Vec::new(),
+            seen: 0,
+        });
         if let Some(n) = name.filter(|n| !n.is_empty()) {
             p.name = n.to_owned();
         }
-        p.codes.retain(|c| c != code);
-        p.codes.insert(0, code.to_owned());
-        p.codes.truncate(MAX_REMEMBERED);
+        p.meetings.retain(|c| c != code);
+        p.meetings.insert(0, code.clone());
+        p.meetings.truncate(MAX_REMEMBERED);
+        p.seen = store::now();
+        tx.people().upsert(&p)
     });
 }
 
+/// What is remembered about `key`, if anything.
+fn person(db: &Db, key: &PublicKey) -> Option<Person> {
+    store::read(db, |tx| tx.people().get(PersonKey::new(key.to_string())))
+}
+
+/// The meeting with this code and its answers.
+fn load(db: &Db, code: &Code) -> Option<(Meeting, Vec<Answer>)> {
+    store::read(db, |tx| match tx.meetings().get(code)? {
+        Some(m) => Ok(Some((m, tx.answers().by_meeting(code)?))),
+        None => Ok(None),
+    })
+}
+
 pub struct Meet {
+    db: Arc<Db>,
     /// The key of this session.
     viewer: PublicKey,
     /// The meeting open in this session.
-    code: Option<String>,
+    code: Option<Code>,
     /// The version of it that is on screen.
     seen: u64,
     /// How many options the open meeting has.
@@ -148,8 +147,9 @@ pub struct Meet {
 }
 
 impl Meet {
-    pub fn new(viewer: PublicKey) -> Self {
+    pub fn new(db: Arc<Db>, viewer: PublicKey) -> Self {
         Meet {
+            db,
             viewer,
             code: None,
             seen: 0,
@@ -173,42 +173,45 @@ impl Meet {
 
     /// The meetings this key knows about, as buttons.
     fn show_mine(&mut self, out: &mut Outbox, key: PublicKey) {
-        let meetings = MEETINGS.lock().unwrap();
-        let codes: Vec<String> = PEOPLE
-            .snapshot(&key)
-            .codes
-            .into_iter()
-            .filter(|c| meetings.contains_key(c))
-            .collect();
-        let buttons = codes
+        let meetings: Vec<Meeting> = store::read(&self.db, |tx| {
+            let Some(p) = tx.people().get(PersonKey::new(key.to_string()))? else {
+                return Ok(Vec::new());
+            };
+            p.meetings
+                .iter()
+                .filter_map(|c| tx.meetings().get(c).transpose())
+                .collect()
+        });
+        let buttons = meetings
             .iter()
             .enumerate()
-            .map(|(k, code)| {
-                let m = &meetings[code];
+            .map(|(k, m)| {
+                let code = m.code.0.as_str();
                 ui::button(format!("mine_{k}"))
                     .parent("mine_list")
                     .label(format!("{} ({code})", m.name))
-                    .on_press(Handler::action("open").payload(code.as_str()))
+                    .on_press(Handler::action("open").payload(code))
             })
             .collect();
-        drop(meetings);
-        out.signal(json!({"has_mine": !codes.is_empty()}));
+        out.signal(json!({"has_mine": !meetings.is_empty()}));
         Self::replace(out, &mut self.mine_ids, buttons);
     }
 
     /// Opens a meeting in this session.
     fn enter(&mut self, out: &mut Outbox, key: PublicKey, code: &str) {
         self.close_view(out);
-        let Some(m) = MEETINGS.lock().unwrap().get(code).cloned() else {
+        let code = Code::new(code);
+        let Some((m, answers)) = load(&self.db, &code) else {
             out.signal(feedback(
                 "failure",
-                format!("There is no meeting with the code {code}."),
+                format!("There is no meeting with the code {}.", code.0),
             ));
             return;
         };
-        self.code = Some(code.to_owned());
+        self.code = Some(code.clone());
         self.options = m.options.len();
-        let mine = m.answers.iter().find(|(k, _)| *k == key).map(|(_, a)| a);
+        let me = key.to_string();
+        let mine = answers.iter().find(|a| a.key == me);
         let mut answer = Map::new();
         for k in 0..MAX_OPTIONS {
             let on = mine.is_some_and(|a| a.picks.get(k).copied().unwrap_or(false));
@@ -216,8 +219,11 @@ impl Meet {
         }
         answer.insert(
             "name".into(),
-            mine.map_or_else(|| PEOPLE.snapshot(&key).name, |a| a.name.clone())
-                .into(),
+            mine.map_or_else(
+                || person(&self.db, &key).map(|p| p.name).unwrap_or_default(),
+                |a| a.name.clone(),
+            )
+            .into(),
         );
         answer.insert("other".into(), mine.map_or("", |a| &a.other).into());
         out.signal(
@@ -241,7 +247,7 @@ impl Meet {
             );
         }
         Self::replace(out, &mut self.meeting_ids, elements);
-        remember(&key, code, None);
+        remember(&self.db, &key, &code, None);
         self.show_mine(out, key);
         self.refresh(out, key);
     }
@@ -264,19 +270,20 @@ impl Meet {
         let Some(code) = self.code.clone() else {
             return;
         };
-        let Some(m) = MEETINGS.lock().unwrap().get(&code).cloned() else {
+        let Some((m, answers)) = load(&self.db, &code) else {
             self.go_home(out, key);
             out.signal(feedback(
                 "warning",
-                format!("The meeting {code} no longer exists."),
+                format!("The meeting {} no longer exists.", code.0),
             ));
             return;
         };
         self.seen = m.version;
-        let who = |k: &PublicKey, a: &Answer| {
-            let tag = if *k == key {
+        let me = key.to_string();
+        let who = |a: &Answer| {
+            let tag = if a.key == me {
                 " (you)"
-            } else if *k == m.owner {
+            } else if a.key == m.owner {
                 " (organizer)"
             } else {
                 ""
@@ -286,11 +293,10 @@ impl Meet {
         let mut results = Map::new();
         let mut counts = Vec::new();
         for (k, option) in m.options.iter().enumerate() {
-            let yes: Vec<String> = m
-                .answers
+            let yes: Vec<String> = answers
                 .iter()
-                .filter(|(_, a)| a.picks.get(k).copied().unwrap_or(false))
-                .map(|(pk, a)| who(pk, a))
+                .filter(|a| a.picks.get(k).copied().unwrap_or(false))
+                .map(who)
                 .collect();
             counts.push(yes.len());
             let line = if yes.is_empty() {
@@ -314,7 +320,7 @@ impl Meet {
             format!(
                 "Best so far: {} ({top} of {} answered)",
                 winners.join(" / "),
-                m.answers.len()
+                answers.len()
             )
         };
         results.insert("best".into(), best.into());
@@ -322,19 +328,18 @@ impl Meet {
             "meeting": {
                 "name": m.name,
                 "description": m.description,
-                "code": code,
+                "code": code.0,
                 "owner": format!("Created by {}", m.owner_name),
-                "is_owner": m.owner == key,
+                "is_owner": m.owner == me,
                 "closed": m.closed,
-                "count": format!("{} answered", m.answers.len()),
+                "count": format!("{} answered", answers.len()),
             },
             "results": results,
         }));
-        let rows = m
-            .answers
+        let rows = answers
             .iter()
             .enumerate()
-            .map(|(n, (pk, a))| {
+            .map(|(n, a)| {
                 let picked: Vec<&str> = m
                     .options
                     .iter()
@@ -344,7 +349,7 @@ impl Meet {
                     .collect();
                 let mut line = format!(
                     "{} — {}",
-                    who(pk, a),
+                    who(a),
                     if picked.is_empty() {
                         "none of the options".to_owned()
                     } else {
@@ -383,31 +388,28 @@ impl Meet {
         if options.len() > MAX_OPTIONS {
             return fail(out, &format!("At most {MAX_OPTIONS} times, please."));
         }
-        let code = {
-            let mut meetings = MEETINGS.lock().unwrap();
-            let code = new_code(&meetings);
-            meetings.insert(
-                code.clone(),
-                Meeting {
-                    name: title,
-                    description: limit(text(action, "form.description"), MAX_NOTE_LEN * 2),
-                    owner: key,
-                    owner_name: name.clone(),
-                    options,
-                    answers: Vec::new(),
-                    closed: false,
-                    version: 1,
-                    touched: Instant::now(),
-                },
-            );
-            code
-        };
-        remember(&key, &code, Some(&name));
+        let description = limit(text(action, "form.description"), MAX_NOTE_LEN * 2);
+        let code = store::write(&self.db, |tx| {
+            let code = new_code(tx)?;
+            tx.meetings().insert(&Meeting {
+                code: code.clone(),
+                name: title,
+                description,
+                owner: key.to_string(),
+                owner_name: name.clone(),
+                options,
+                closed: false,
+                version: 1,
+                touched: store::now(),
+            })?;
+            Ok(code)
+        });
+        remember(&self.db, &key, &code, Some(&name));
         out.signal(json!({"form": {"title": "", "description": "", "options": ""}}));
-        self.enter(out, key, &code);
+        self.enter(out, key, &code.0);
         out.signal(feedback(
             "success",
-            format!("Created. Share the code {code}."),
+            format!("Created. Share the code {}.", code.0),
         ));
     }
 
@@ -420,40 +422,51 @@ impl Meet {
             return out.signal(feedback("failure", "Enter your name to answer."));
         }
         let note = limit(text(action, "answer.other"), MAX_NOTE_LEN);
-        let result = {
-            let mut meetings = MEETINGS.lock().unwrap();
-            match meetings.get_mut(&code) {
-                None => Err("That meeting no longer exists."),
-                Some(m) if m.closed => Err("The meeting is closed to new answers."),
-                Some(m) => {
-                    let picks = (0..m.options.len())
-                        .map(|k| {
-                            action
-                                .signal(&format!("answer.o{k}"))
-                                .and_then(Value::as_bool)
-                                == Some(true)
-                        })
-                        .collect();
-                    let answer = Answer {
+        let me = key.to_string();
+        let result = store::write(&self.db, |tx| {
+            let Some(mut m) = tx.meetings().get(&code)? else {
+                return Ok(Err("That meeting no longer exists."));
+            };
+            if m.closed {
+                return Ok(Err("The meeting is closed to new answers."));
+            }
+            let picks = (0..m.options.len())
+                .map(|k| {
+                    action
+                        .signal(&format!("answer.o{k}"))
+                        .and_then(Value::as_bool)
+                        == Some(true)
+                })
+                .collect();
+            let answers = tx.answers().by_meeting(&code)?;
+            match answers.into_iter().find(|a| a.key == me) {
+                Some(mut a) => {
+                    a.name = name.clone();
+                    a.picks = picks;
+                    a.other = note;
+                    tx.answers().update(&a)?;
+                }
+                None if tx.answers().ids_by_meeting(&code)?.len() >= MAX_ANSWERS => {
+                    return Ok(Err("This meeting is full."));
+                }
+                None => {
+                    tx.answers().create(|id| Answer {
+                        id,
+                        meeting: code.clone(),
+                        key: me.clone(),
                         name: name.clone(),
                         picks,
                         other: note,
-                    };
-                    match m.answers.iter().position(|(k, _)| *k == key) {
-                        Some(i) => m.answers[i].1 = answer,
-                        None if m.answers.len() >= MAX_ANSWERS => {
-                            return out.signal(feedback("failure", "This meeting is full."));
-                        }
-                        None => m.answers.push((key, answer)),
-                    }
-                    m.changed();
-                    Ok(())
+                    })?;
                 }
             }
-        };
+            m.changed();
+            tx.meetings().update(&m)?;
+            Ok(Ok(()))
+        });
         match result {
             Ok(()) => {
-                remember(&key, &code, Some(&name));
+                remember(&self.db, &key, &code, Some(&name));
                 out.signal(feedback(
                     "success",
                     "Your answer is saved. You can change it any time.",
@@ -469,26 +482,38 @@ impl Meet {
         &mut self,
         out: &mut Outbox,
         key: PublicKey,
-        f: impl FnOnce(&mut HashMap<String, Meeting>, &str),
+        f: impl FnOnce(&WriteTx, &Code) -> orangedb::Result<()>,
     ) -> bool {
         let Some(code) = self.code.clone() else {
             return false;
         };
-        let mut meetings = MEETINGS.lock().unwrap();
-        if meetings.get(&code).is_none_or(|m| m.owner != key) {
-            drop(meetings);
+        let me = key.to_string();
+        let owned = store::write(&self.db, |tx| {
+            if tx.meetings().get(&code)?.is_none_or(|m| m.owner != me) {
+                return Ok(false);
+            }
+            f(tx, &code)?;
+            Ok(true)
+        });
+        if !owned {
             out.signal(feedback("failure", "Only the organizer can do that."));
-            return false;
         }
-        f(&mut meetings, &code);
-        true
+        owned
     }
 }
 
 impl App for Meet {
     fn hello(&mut self, out: &mut Outbox, _: &BTreeMap<String, String>) {
         let key = self.viewer;
-        let name = PEOPLE.snapshot(&key).name;
+        // A visit keeps the person remembered.
+        let name = store::write(&self.db, |tx| {
+            let Some(mut p) = tx.people().get(PersonKey::new(key.to_string()))? else {
+                return Ok(String::new());
+            };
+            p.seen = store::now();
+            tx.people().update(&p)?;
+            Ok(p.name)
+        });
         out.metadata(
             Metadata::new()
                 .name("meet")
@@ -740,19 +765,23 @@ impl App for Meet {
             }
             "save" => self.answer(out, key, action),
             "toggle" => {
-                let owned = self.as_owner(out, key, |meetings, code| {
-                    if let Some(m) = meetings.get_mut(code) {
+                let owned = self.as_owner(out, key, |tx, code| {
+                    if let Some(mut m) = tx.meetings().get(code)? {
                         m.closed = !m.closed;
                         m.changed();
+                        tx.meetings().update(&m)?;
                     }
+                    Ok(())
                 });
                 if owned {
                     self.refresh(out, key);
                 }
             }
             "delete" => {
-                let owned = self.as_owner(out, key, |meetings, code| {
-                    meetings.remove(code);
+                // Its answers go with it, and it leaves everyone's list.
+                let owned = self.as_owner(out, key, |tx, code| {
+                    tx.meetings().delete(code)?;
+                    Ok(())
                 });
                 if owned {
                     self.go_home(out, key);
@@ -765,7 +794,7 @@ impl App for Meet {
 
     fn tick(&mut self, out: &mut Outbox, _: f64) {
         let Some(code) = &self.code else { return };
-        let version = MEETINGS.lock().unwrap().get(code).map(|m| m.version);
+        let version = store::read(&self.db, |tx| Ok(tx.meetings().get(code)?.map(|m| m.version)));
         if version == Some(self.seen) {
             return;
         }
@@ -826,10 +855,14 @@ mod tests {
         }
     }
 
-    fn connect(key: PublicKey) -> Loopback {
+    fn db() -> Arc<Db> {
+        Arc::new(Db::in_memory().unwrap())
+    }
+
+    fn connect(db: &Arc<Db>, key: PublicKey) -> Loopback {
         let mut l = Loopback {
             client: Client::new(),
-            app: Meet::new(key),
+            app: Meet::new(db.clone(), key),
             out: Outbox::new(),
         };
         let hello = l.client.hello();
@@ -841,8 +874,8 @@ mod tests {
         Identity::generate().public()
     }
 
-    fn create(key: PublicKey) -> (Loopback, String) {
-        let mut l = connect(key);
+    fn create(db: &Arc<Db>, key: PublicKey) -> (Loopback, String) {
+        let mut l = connect(db, key);
         l.write("form.title", json!("Team lunch"));
         l.write(
             "form.options",
@@ -870,8 +903,9 @@ mod tests {
 
     #[test]
     fn create_join_answer_and_watch() {
+        let db = db();
         let (ann_key, bob_key) = (person(), person());
-        let (mut ann, code) = create(ann_key);
+        let (mut ann, code) = create(&db, ann_key);
         assert_eq!(code.len(), 6);
         assert_eq!(ann.client.value("view"), Some(&json!("meeting")));
         assert_eq!(ann.client.value("meeting.is_owner"), Some(&json!(true)));
@@ -889,7 +923,7 @@ mod tests {
         );
 
         // Bob joins with the code, in lowercase.
-        let mut bob = connect(bob_key);
+        let mut bob = connect(&db, bob_key);
         assert_eq!(bob.client.attr("mine", "visible"), Some(json!(false)));
         bob.write("form.code", json!(format!(" {} ", code.to_lowercase())));
         assert!(bob.trigger("join_btn", "onPress"));
@@ -956,9 +990,10 @@ mod tests {
 
     #[test]
     fn identities_decide_who_can_do_what() {
+        let db = db();
         let (ann_key, bob_key) = (person(), person());
-        let (mut ann, code) = create(ann_key);
-        let mut bob = connect(bob_key);
+        let (mut ann, code) = create(&db, ann_key);
+        let mut bob = connect(&db, bob_key);
         bob.write("form.code", json!("nope00"));
         assert!(bob.trigger("join_btn", "onPress"));
         assert_eq!(bob.client.value("view"), Some(&json!("home")));
@@ -985,7 +1020,7 @@ mod tests {
             bob.client.attr("feedback", "text"),
             Some(json!("Only the organizer can do that."))
         );
-        assert!(MEETINGS.lock().unwrap().contains_key(&code));
+        assert!(db.meetings().contains(Code::new(code.clone())).unwrap());
 
         // Closing locks answers for everyone.
         assert!(ann.trigger("toggle", "onPress"));
@@ -1004,7 +1039,7 @@ mod tests {
         // Bob comes back later with the same key: the meeting is listed and
         // his answer is filled in.
         drop(bob);
-        let mut bob = connect(bob_key);
+        let mut bob = connect(&db, bob_key);
         assert_eq!(bob.client.value("form.name"), Some(&json!("Bob")));
         assert_eq!(bob.client.attr("mine", "visible"), Some(json!(true)));
         assert_eq!(
@@ -1039,9 +1074,52 @@ mod tests {
     }
 
     #[test]
+    fn meetings_survive_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meet.redb");
+        let ann_key = person();
+        let db = Arc::new(Db::open(&path).unwrap());
+        let (mut ann, code) = create(&db, ann_key);
+        ann.write("answer.name", json!("Ann"));
+        ann.write("answer.o2", json!(true));
+        assert!(ann.trigger("save", "onPress"));
+        drop((ann, db));
+
+        let db = Arc::new(Db::open(&path).unwrap());
+        let mut ann = connect(&db, ann_key);
+        assert_eq!(ann.client.value("form.name"), Some(&json!("Ann")));
+        assert_eq!(
+            ann.client.attr("mine_0", "label"),
+            Some(json!(format!("Team lunch ({code})")))
+        );
+        assert!(ann.trigger("mine_0", "onPress"));
+        assert_eq!(ann.client.value("answer.o2"), Some(&json!(true)));
+        assert_eq!(
+            ann.client.attr("res_2", "text"),
+            Some(json!("Thu 13:00: 1 available — Ann (you)"))
+        );
+    }
+
+    #[test]
+    fn prune_forgets_old_meetings() {
+        let db = db();
+        let (_ann, code) = create(&db, person());
+        let code = Code::new(code);
+        prune(&db);
+        assert!(db.meetings().contains(&code).unwrap());
+        let mut m = db.meetings().get(&code).unwrap().unwrap();
+        m.touched -= MEETING_TTL.as_secs();
+        db.meetings().update(&m).unwrap();
+        prune(&db);
+        assert!(!db.meetings().contains(&code).unwrap());
+        // Nobody remembers it any more.
+        assert!(db.people().all().unwrap().iter().all(|p| p.meetings.is_empty()));
+    }
+
+    #[test]
     fn needs_a_name_and_times() {
         let key = person();
-        let mut l = connect(key);
+        let mut l = connect(&db(), key);
         l.write("form.name", json!("Ann"));
         assert!(l.trigger("create_btn", "onPress"));
         assert_eq!(

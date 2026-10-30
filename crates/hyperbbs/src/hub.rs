@@ -1,7 +1,7 @@
 //! What the sessions share: the database, the nodes (the "phone lines" in
 //! use), the teleconference and the events that keep every screen live.
 
-use crate::db::Store;
+use crate::db::{Store, UserKey};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
@@ -31,11 +31,11 @@ pub enum Event {
     /// for their screen from the database itself.
     Changed,
     /// A letter arrived for this key.
-    Mail { to: String },
+    Mail { to: UserKey },
     /// A user on `node` asks the user on `to` to join the teleconference.
     Page { to: u32, from: String },
     /// The sysop banned this key.
-    Kick { key: String },
+    Kick { key: UserKey },
 }
 
 #[derive(Clone, Debug)]
@@ -58,7 +58,7 @@ pub enum ChatKind {
 /// A caller on a line.
 #[derive(Clone)]
 pub struct Node {
-    pub key: String,
+    pub key: UserKey,
     /// Empty until a new user has registered.
     pub handle: String,
     pub since: i64,
@@ -94,13 +94,13 @@ impl Hub {
     }
 
     /// Takes the lowest free line, if any.
-    pub fn take_node(self: &Arc<Self>, key: &str, now: i64) -> Option<NodeGuard> {
+    pub fn take_node(self: &Arc<Self>, key: &UserKey, now: i64) -> Option<NodeGuard> {
         let mut nodes = self.nodes.lock().unwrap();
         let n = (1..=self.config.nodes).find(|n| !nodes.contains_key(n))?;
         nodes.insert(
             n,
             Node {
-                key: key.into(),
+                key: key.clone(),
                 handle: String::new(),
                 since: now,
                 doing: "Logging in",
@@ -125,9 +125,8 @@ impl Hub {
         self.nodes.lock().unwrap().len()
     }
 
-    pub fn is_sysop(&self, key: &str) -> bool {
-        self.config.sysops.iter().any(|k| k == key)
-            || self.store.get().user(key).is_some_and(|u| u.sysop)
+    pub fn is_sysop(&self, key: &UserKey) -> bool {
+        self.config.sysops.contains(&key.0) || self.store.user(key).is_some_and(|u| u.sysop)
     }
 
     /// Says something in the teleconference.

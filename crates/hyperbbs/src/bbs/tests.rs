@@ -2,7 +2,7 @@
 //! renderer core, which also checks every element and expression.
 
 use super::*;
-use crate::db::Store;
+use crate::db::{Store, UserKey};
 use crate::hub::Config;
 use hypereffect::client::Client;
 use hypereffect::RendererMessage;
@@ -33,7 +33,7 @@ impl Caller {
     fn dial(hub: &Arc<Hub>, key: &str) -> Self {
         let mut c = Caller {
             events: hub.subscribe(),
-            bbs: Bbs::new(hub.clone(), key.into()),
+            bbs: Bbs::new(hub.clone(), UserKey::new(key)),
             client: Client::new(),
             out: Outbox::new(),
             last: Vec::new(),
@@ -148,6 +148,14 @@ impl Caller {
 const ALICE: &str = "aa";
 const BOB: &str = "bb";
 
+fn key(k: &str) -> UserKey {
+    UserKey::new(k)
+}
+
+fn first_board(hub: &Hub) -> BoardId {
+    hub.store.boards()[0].id
+}
+
 #[test]
 fn first_caller_registers_and_becomes_sysop() {
     let hub = hub(4);
@@ -227,7 +235,7 @@ fn topics_and_replies_are_live() {
     let hub = hub(4);
     let mut a = Caller::join(&hub, ALICE, "Alice");
     let mut b = Caller::join(&hub, BOB, "Bob");
-    let board = hub.store.get().boards[0].id;
+    let board = first_board(&hub).0;
     assert!(a.press("m_boards"));
     assert!(a.press(&format!("b{board}_go")));
     assert!(a.press("new_topic"));
@@ -240,25 +248,23 @@ fn topics_and_replies_are_live() {
     assert!(b.press("m_boards"));
     assert!(b.shows("1 new"), "{}", b.screen());
     assert!(b.press(&format!("b{board}_go")));
-    let topic = hub.store.get().topics[0].id;
-    assert!(b.press(&format!("t{topic}_go")));
+    let topic = hub.store.topics_of(BoardId(board))[0].id;
+    assert!(b.press(&format!("t{}_go", topic.0)));
     b.client.write("f.body", json!("Welcome, Alice."));
     assert!(b.press("reply"));
     assert_eq!(b.client.value("f.body"), Some(&json!("")));
     // Alice was looking at the topic, and the reply showed up there.
     a.pump();
     assert!(a.shows("Welcome, Alice."), "{}", a.screen());
-    {
-        let db = hub.store.get();
-        assert!(!db.is_unread(BOB, &db.topics[0]));
-    }
+    let t = hub.store.topic(topic).unwrap();
+    assert!(!is_unread(hub.store.user(&key(BOB)).as_ref(), &t));
     // Bob cannot delete Alice's post, the sysop can delete his.
-    let first = hub.store.get().posts[0].id;
-    let second = hub.store.get().posts[1].id;
+    let posts = hub.store.posts_of(topic);
+    let (first, second) = (posts[0].id.0, posts[1].id.0);
     assert!(!b.client.contains(&format!("p{first}_del")));
     assert!(a.press(&format!("p{second}_del")));
-    assert_eq!(hub.store.get().posts.len(), 1);
-    assert_eq!(hub.store.get().user(BOB).unwrap().posts, 1);
+    assert_eq!(hub.store.posts_of(topic).len(), 1);
+    assert_eq!(hub.store.user(&key(BOB)).unwrap().posts, 1);
 }
 
 #[test]
@@ -324,7 +330,7 @@ fn mail() {
     assert_eq!(a.client.value("_mail"), Some(&json!(1)));
     assert!(a.shows("1 new letter"));
     assert!(a.press("m_mail"));
-    let id = hub.store.get().mail[0].id;
+    let id = hub.store.inbox(&key(ALICE))[0].id.0;
     assert!(a.press(&format!("l{id}_go")));
     assert!(a.shows("Pizza?"));
     assert_eq!(a.client.value("_mail"), Some(&json!(0)));
@@ -336,7 +342,7 @@ fn mail() {
     b.send(&format!("action {}\n", json!({"name": "go", "payload": {"screen": "letter", "id": id}})));
     assert!(b.shows("This letter is gone."));
     b.send(&format!("action {}\n", json!({"name": "delete_mail", "payload": id})));
-    assert_eq!(hub.store.get().mail.len(), 1);
+    assert_eq!(hub.store.stats().letters, 1);
 }
 
 #[test]
@@ -373,10 +379,10 @@ fn bans_kick_and_keep_out() {
     // Only sysops ban.
     let mut c = Caller::join(&hub, "cc", "Carol");
     c.send(&format!("action {}\n", json!({"name": "unban", "payload": BOB})));
-    assert!(hub.store.get().user(BOB).unwrap().banned);
+    assert!(hub.store.user(&key(BOB)).unwrap().banned);
     drop(c);
     assert!(a.press("ubb_unban"));
-    assert!(!hub.store.get().user(BOB).unwrap().banned);
+    assert!(!hub.store.user(&key(BOB)).unwrap().banned);
 }
 
 #[test]
@@ -389,31 +395,50 @@ fn lines_run_out() {
 }
 
 #[test]
-fn database_round_trips() {
-    let hub = hub(4);
+fn the_database_survives_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bbs.redb");
+    let open = || {
+        Hub::new(
+            Config {
+                name: "Test BBS".into(),
+                nodes: 4,
+                sysops: vec![],
+                banner: default_banner("Test BBS"),
+            },
+            Store::open(&path).unwrap(),
+        )
+    };
+    let hub = open();
     let mut a = Caller::join(&hub, ALICE, "Alice");
     assert!(a.press("m_one"));
     a.client.write("f.oneliner", json!("persist me"));
     assert!(a.press("one_send"));
-    let json = serde_json::to_string(&*hub.store.get()).unwrap();
-    let db: Db = serde_json::from_str(&json).unwrap();
-    assert_eq!(db.user(ALICE).unwrap().handle, "Alice");
-    assert_eq!(db.oneliners[0].text, "persist me");
-    assert_eq!(db.boards.len(), 3);
+    drop((a, hub));
+
+    let hub = open();
+    assert_eq!(hub.store.user(&key(ALICE)).unwrap().handle, "Alice");
+    assert_eq!(hub.store.oneliners()[0].text, "persist me");
+    // Seeded once, not again.
+    assert_eq!(hub.store.boards().len(), 3);
+    let a = Caller::dial(&hub, ALICE);
+    assert!(a.shows("Welcome back, Alice!"), "{}", a.screen());
+    assert!(a.shows("You are caller #2"));
 }
 
 // The server guide's rules: build once, then change as little as possible.
 
 /// Starts a topic on the first board as `c`, who must be at the main menu.
-fn start_topic(hub: &Arc<Hub>, c: &mut Caller, subject: &str) -> u64 {
-    let board = hub.store.get().boards[0].id;
+fn start_topic(hub: &Arc<Hub>, c: &mut Caller, subject: &str) -> TopicId {
+    let board = first_board(hub).0;
     assert!(c.press("m_boards"));
     assert!(c.press(&format!("b{board}_go")));
     assert!(c.press("new_topic"));
     c.client.write("f.subject", json!(subject));
     c.client.write("f.body", json!("…"));
     assert!(c.press("nt_post"));
-    hub.store.get().topics.last().unwrap().id
+    // The newest topic is the most recently active.
+    hub.store.topics_of(BoardId(board))[0].id
 }
 
 #[test]
@@ -422,15 +447,15 @@ fn a_reply_adds_one_card_and_keeps_the_draft() {
     let mut a = Caller::join(&hub, ALICE, "Alice");
     let mut b = Caller::join(&hub, BOB, "Bob");
     let topic = start_topic(&hub, &mut a, "Drafts");
-    let board = hub.store.get().boards[0].id;
+    let board = first_board(&hub).0;
     assert!(b.press("m_boards"));
     assert!(b.press(&format!("b{board}_go")));
-    assert!(b.press(&format!("t{topic}_go")));
+    assert!(b.press(&format!("t{}_go", topic.0)));
     b.client.write("f.body", json!("half a thought"));
 
     a.client.write("f.body", json!("A reply."));
     assert!(a.press("reply"));
-    let post = hub.store.get().posts.last().unwrap().id;
+    let post = hub.store.posts_of(topic).last().unwrap().id.0;
     // Alice's own reply already shows her card, in the reply itself.
     assert!(a.shows("A reply."));
     b.pump();
@@ -452,13 +477,14 @@ fn a_reply_moves_its_topic_to_the_top_with_one_element() {
     a.client.write("f.subject", json!("New"));
     a.client.write("f.body", json!("…"));
     assert!(a.press("nt_post"));
-    let new = hub.store.get().topics.last().unwrap().id;
-    let board = hub.store.get().boards[0].id;
+    let board = first_board(&hub);
+    let new = hub.store.topics_of(board)[0].id;
     assert!(b.press("m_boards"));
-    assert!(b.press(&format!("b{board}_go")));
+    assert!(b.press(&format!("b{}_go", board.0)));
+    let (old, new) = (old.0, new.0);
     assert_eq!(b.client.children(Some("topics")), [format!("t{new}"), format!("t{old}")]);
 
-    hub.store.edit(|db| db.add_post(old, ALICE, "bump", now()));
+    hub.store.add_post(TopicId(old), &key(ALICE), "bump", now());
     hub.emit(Event::Changed);
     b.pump();
     // The row moves (its children with it); the caption is a signal.

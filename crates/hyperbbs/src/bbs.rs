@@ -25,7 +25,11 @@
 //!
 //! User text goes into literal attributes or signals, never into CEL.
 
-use crate::db::{Board, Bulletin, Db, Letter, Oneliner, Post, Topic, User};
+use crate::db::{
+    is_unread, Board, BoardId, Bulletin, Letter, LetterId, Oneliner, Post, PostId, Store, Topic,
+    TopicId,
+    User, UserKey,
+};
 use crate::hub::{ChatKind, ChatLine, Event, Hub, Node, NodeGuard};
 use chrono::{Local, TimeZone};
 use hypereffect::signals::merge_patch;
@@ -56,13 +60,13 @@ pub enum Screen {
     Menu,
     Boards,
     Board {
-        id: u64,
+        id: BoardId,
     },
     Topic {
-        id: u64,
+        id: TopicId,
     },
     NewTopic {
-        board: u64,
+        board: BoardId,
     },
     Chat,
     Oneliners,
@@ -71,7 +75,7 @@ pub enum Screen {
     Callers,
     Mail,
     Letter {
-        id: u64,
+        id: LetterId,
     },
     Compose {
         #[serde(default)]
@@ -111,7 +115,7 @@ impl Screen {
 pub struct Bbs {
     hub: Arc<Hub>,
     /// The caller's iroh endpoint key, in hex.
-    key: String,
+    key: UserKey,
     node: Option<NodeGuard>,
     screen: Screen,
     /// When the session started (after the hello).
@@ -140,7 +144,7 @@ struct Welcome {
 }
 
 impl Bbs {
-    pub fn new(hub: Arc<Hub>, key: String) -> Self {
+    pub fn new(hub: Arc<Hub>, key: UserKey) -> Self {
         Bbs {
             hub,
             key,
@@ -207,7 +211,7 @@ impl Bbs {
         };
         self.put(out, json!({"_node": node.n}));
         self.node = Some(node);
-        let user = self.hub.store.get().user(&self.key).cloned();
+        let user = self.hub.store.user(&self.key);
         match user {
             Some(u) if u.banned => {
                 self.refuse(out, "Access denied", "This key is banned from the board.");
@@ -218,7 +222,7 @@ impl Bbs {
                 self.login(out);
             }
             None => {
-                println!("node {}: new caller {}", self.node().unwrap_or(0), self.key);
+                println!("node {}: new caller {}", self.node().unwrap_or(0), self.key.0);
                 self.show(out, Screen::Login);
             }
         }
@@ -254,7 +258,6 @@ impl Bbs {
             }
             return;
         }
-        let id = || a.payload_as::<u64>();
         match a.name.as_str() {
             "go" => {
                 if let Some(s) = a.payload_as::<Screen>() {
@@ -263,17 +266,17 @@ impl Bbs {
             }
             "hangup" => self.show(out, Screen::Goodbye),
             "post_topic" => {
-                if let Some(board) = id() {
+                if let Some(board) = a.payload_as() {
                     self.post_topic(out, board, &field("subject"), &field("body"));
                 }
             }
             "reply" => {
-                if let Some(topic) = id() {
+                if let Some(topic) = a.payload_as() {
                     self.reply(out, topic, &field("body"));
                 }
             }
             "delete_post" => {
-                if let Some(post) = id() {
+                if let Some(post) = a.payload_as() {
                     self.delete_post(out, post);
                 }
             }
@@ -281,7 +284,7 @@ impl Bbs {
             "oneliner" => self.oneliner(out, &field("oneliner")),
             "send_mail" => self.send_mail(out, &field("to"), &field("subject"), &field("body")),
             "delete_mail" => {
-                if let Some(letter) = id() {
+                if let Some(letter) = a.payload_as() {
                     self.delete_mail(out, letter);
                 }
             }
@@ -295,21 +298,21 @@ impl Bbs {
             _ if !self.hub.is_sysop(&self.key) => {}
             "post_bulletin" => self.post_bulletin(out, &field("title"), &field("body")),
             "delete_bulletin" => {
-                if let Some(b) = id() {
-                    self.hub.store.edit(|db| db.bulletins.retain(|x| x.id != b));
+                if let Some(b) = a.payload_as() {
+                    self.hub.store.delete_bulletin(b);
                     self.changed(out);
                 }
             }
             "new_board" => self.new_board(out, &field("name"), &field("desc")),
             "delete_board" => {
-                if let Some(b) = id() {
-                    self.hub.store.edit(|db| db.delete_board(b));
+                if let Some(b) = a.payload_as() {
+                    self.hub.store.delete_board(b);
                     self.changed(out);
                     self.flash(out, "info", "Board deleted.");
                 }
             }
             "ban" | "unban" => {
-                if let Some(key) = a.payload_as::<String>() {
+                if let Some(key) = a.payload_as::<UserKey>() {
                     self.ban(out, &key, a.name == "ban");
                 }
             }
@@ -388,15 +391,14 @@ impl Bbs {
     fn sync_globals(&mut self, out: &mut Outbox) {
         let hub = self.hub.clone();
         let (unread, total, mail) = {
-            let db = hub.store.get();
             let mut unread = Map::new();
             let mut total = 0;
-            for b in &db.boards {
-                let n = if self.registered { db.unread_in(&self.key, b.id) } else { 0 };
+            for (b, n) in hub.store.unread(&self.key) {
+                let n = if self.registered { n } else { 0 };
                 total += n;
-                unread.insert(format!("b{}", b.id), n.into());
+                unread.insert(format!("b{}", b.0), n.into());
             }
-            (unread, total, db.unread_mail(&self.key))
+            (unread, total, hub.store.unread_mail(&self.key))
         };
         let (online, chatters) = {
             let nodes = hub.nodes.lock().unwrap();
@@ -426,7 +428,7 @@ impl Bbs {
             Screen::Board { id } => self.sync_board(out, id),
             Screen::Topic { id } => self.sync_topic(out, id),
             Screen::NewTopic { board } => {
-                let gone = self.hub.store.get().board(board).is_none();
+                let gone = self.hub.store.board(board).is_none();
                 if gone {
                     self.lost(out);
                 }
@@ -587,11 +589,10 @@ impl Bbs {
             Screen::Compose { to, subject } => json!({"to": to, "subject": subject, "body": ""}),
             Screen::Bulletins => json!({"title": "", "body": ""}),
             Screen::Profile => {
-                let db = self.hub.store.get();
-                let u = db.user(&self.key);
+                let u = self.hub.store.user(&self.key);
                 json!({
-                    "location": u.map_or("", |u| &u.location),
-                    "tagline": u.map_or("", |u| &u.tagline),
+                    "location": u.as_ref().map_or("", |u| &u.location),
+                    "tagline": u.as_ref().map_or("", |u| &u.tagline),
                 })
             }
             Screen::Sysop => json!({"name": "", "desc": ""}),
@@ -662,7 +663,7 @@ impl Bbs {
     }
 
     fn handle(&self) -> String {
-        self.hub.store.get().handle(&self.key)
+        self.hub.store.handle(&self.key)
     }
 
     // Logging in.
@@ -741,30 +742,14 @@ impl Bbs {
         if let Some(p) = problem {
             return self.flash(out, "failure", &p);
         }
-        let now = now();
-        let taken = self.hub.store.edit(|db| {
-            if db.find_handle(&handle).is_some() {
-                return true;
-            }
-            // The first caller to register runs the place.
-            let sysop = db.users.is_empty();
-            db.users.insert(
-                self.key.clone(),
-                User {
-                    handle: handle.clone(),
-                    location: location.into(),
-                    tagline: tagline.into(),
-                    sysop,
-                    joined: now,
-                    ..Default::default()
-                },
-            );
-            false
-        });
-        if taken {
+        let added = self
+            .hub
+            .store
+            .register(&self.key, &handle, location, tagline, now());
+        if !added {
             return self.flash(out, "failure", &format!("{handle} is taken, pick another."));
         }
-        println!("node {}: {} registered as {handle}", self.node().unwrap_or(0), self.key);
+        println!("node {}: {} registered as {handle}", self.node().unwrap_or(0), self.key.0);
         self.registered = true;
         self.login(out);
     }
@@ -774,12 +759,10 @@ impl Bbs {
         let node = self.node().unwrap_or(0);
         let handle = self.handle();
         self.hub.update_node(node, |n| n.handle = handle.clone());
-        let (previous, last_caller) = {
-            let db = self.hub.store.get();
-            let previous = db.user(&self.key).map_or(0, |u| u.last_on);
-            (previous, db.callers.last().map(|c| caller_line(&db, &c.key)))
-        };
-        let number = self.hub.store.edit(|db| db.log_call(&self.key, node, now()));
+        let store = &self.hub.store;
+        let previous = store.user(&self.key).map_or(0, |u| u.last_on);
+        let last_caller = store.callers().last().map(|c| caller_line(store, &c.key));
+        let number = store.log_call(&self.key, node, now());
         self.welcome = Welcome {
             number,
             previous,
@@ -798,8 +781,8 @@ impl Bbs {
             previous,
             ref last_caller,
         } = self.welcome;
-        let db = self.hub.store.get();
-        let Some(u) = db.user(&self.key) else {
+        let store = &self.hub.store;
+        let Some(u) = store.user(&self.key) else {
             return;
         };
         out.element(banner(&self.hub.config.banner));
@@ -823,7 +806,7 @@ impl Bbs {
         if let Some(last) = last_caller {
             lines.push(format!("Last caller: {last}."));
         }
-        let unread: usize = db.boards.iter().map(|b| db.unread_in(&self.key, b.id)).sum();
+        let unread: usize = store.unread(&self.key).values().sum();
         if unread > 0 {
             lines.push(format!("{unread} topics have new posts for you."));
         }
@@ -833,7 +816,7 @@ impl Bbs {
         for (i, line) in lines.iter().enumerate() {
             out.element(body(&format!("welcome{i}"), "welcome", line));
         }
-        let mail = db.unread_mail(&self.key);
+        let mail = store.unread_mail(&self.key);
         if mail > 0 {
             out.element(
                 ui::notice("welcome_mail")
@@ -842,7 +825,7 @@ impl Bbs {
                     .text(format!("{mail} unread letters are waiting for you.")),
             );
         }
-        if let Some(b) = db.bulletins.last() {
+        if let Some(b) = store.bulletins().last() {
             out.element(
                 ui::notice("welcome_bulletin")
                     .parent("body")
@@ -907,16 +890,16 @@ impl Bbs {
     /// The one-liners in `list`, newest first.
     fn sync_wall(&mut self, out: &mut Outbox, list: &str, most: usize, dated: bool) {
         let hub = self.hub.clone();
-        let db = hub.store.get();
-        let want: Vec<_> = db
-            .oneliners
-            .iter()
+        let want: Vec<_> = hub
+            .store
+            .oneliners()
+            .into_iter()
             .rev()
             .take(most)
-            .map(|o| (format!("o{}", o.id), o))
+            .map(|o| (format!("o{}", o.id.0), o))
             .collect();
         reconcile(out, &mut self.items, &want, |o| {
-            vec![oneliner_item(&db, o, list, dated)]
+            vec![oneliner_item(&hub.store, o, list, dated)]
         });
     }
 
@@ -933,24 +916,23 @@ impl Bbs {
     }
 
     fn sync_boards(&mut self, out: &mut Outbox) {
-        let hub = self.hub.clone();
-        let db = hub.store.get();
-        let about: Map<String, Value> = db
-            .boards
+        let store = &self.hub.store;
+        let boards = store.boards();
+        let about: Map<String, Value> = boards
             .iter()
             .map(|b| {
-                let topics = db.topics.iter().filter(|t| t.board == b.id).count();
+                let topics = store.topic_count(b.id);
                 let text = format!("{} · {topics} topics", b.description);
-                (format!("b{}", b.id), text.into())
+                (format!("b{}", b.id.0), text.into())
             })
             .collect();
         self.put(out, json!({"_v": {"about": about}}));
-        let want: Vec<_> = db.boards.iter().map(|b| (format!("b{}", b.id), b)).collect();
-        reconcile(out, &mut self.items, &want, |b| board_item(b));
+        let want: Vec<_> = boards.into_iter().map(|b| (format!("b{}", b.id.0), b)).collect();
+        reconcile(out, &mut self.items, &want, board_item);
     }
 
-    fn draw_board(&mut self, out: &mut Outbox, id: u64) {
-        let Some(board) = self.hub.store.get().board(id).cloned() else {
+    fn draw_board(&mut self, out: &mut Outbox, id: BoardId) {
+        let Some(board) = self.hub.store.board(id) else {
             return self.draw_gone(out, "This board is gone.", Screen::Boards);
         };
         heading(out, "board_h", "body", &board.name);
@@ -972,25 +954,25 @@ impl Bbs {
 
     /// The board's topics, most recently active first: a reply moves its
     /// topic to the top.
-    fn sync_board(&mut self, out: &mut Outbox, id: u64) {
+    fn sync_board(&mut self, out: &mut Outbox, id: BoardId) {
         let hub = self.hub.clone();
-        let db = hub.store.get();
-        if db.board(id).is_none() {
-            drop(db);
+        let store = &hub.store;
+        if store.board(id).is_none() {
             return self.lost(out);
         }
-        let topics = db.topics_of(id);
+        let topics = store.topics_of(id);
+        let user = store.user(&self.key);
         let mut new = Map::new();
         let mut about = Map::new();
         for t in &topics {
-            let k = format!("t{}", t.id);
-            new.insert(k.clone(), db.is_unread(&self.key, t).into());
-            let replies = db.posts_of(t.id).count().saturating_sub(1);
+            let k = format!("t{}", t.id.0);
+            new.insert(k.clone(), is_unread(user.as_ref(), t).into());
+            let replies = store.post_count(t.id).saturating_sub(1);
             about.insert(
                 k,
                 format!(
                     "by {} · {replies} {} · last {}",
-                    db.handle(&t.author),
+                    store.handle(&t.author),
                     if replies == 1 { "reply" } else { "replies" },
                     when(t.last_at)
                 )
@@ -998,12 +980,12 @@ impl Bbs {
             );
         }
         self.put(out, json!({"_v": {"new": new, "about": about}}));
-        let want: Vec<_> = topics.into_iter().map(|t| (format!("t{}", t.id), t)).collect();
-        reconcile(out, &mut self.items, &want, |t| topic_item(t));
+        let want: Vec<_> = topics.into_iter().map(|t| (format!("t{}", t.id.0), t)).collect();
+        reconcile(out, &mut self.items, &want, topic_item);
     }
 
-    fn draw_new_topic(&mut self, out: &mut Outbox, board: u64) {
-        let Some(b) = self.hub.store.get().board(board).cloned() else {
+    fn draw_new_topic(&mut self, out: &mut Outbox, board: BoardId) {
+        let Some(b) = self.hub.store.board(board) else {
             return self.draw_gone(out, "This board is gone.", Screen::Boards);
         };
         heading(out, "nt_h", "body", &format!("New topic in {}", b.name));
@@ -1026,12 +1008,12 @@ impl Bbs {
             "nt_buttons",
             "Post it",
             "primary",
-            Handler::action("post_topic").payload(board),
+            Handler::action("post_topic").payload(board.0),
         ));
         out.element(nav("nt_cancel", "nt_buttons", "Cancel", Screen::Board { id: board }));
     }
 
-    fn post_topic(&mut self, out: &mut Outbox, board: u64, subject: &str, text: &str) {
+    fn post_topic(&mut self, out: &mut Outbox, board: BoardId, subject: &str, text: &str) {
         if subject.is_empty() || text.is_empty() {
             return self.flash(out, "failure", "A topic needs a subject and a message.");
         }
@@ -1042,10 +1024,10 @@ impl Bbs {
                 &format!("At most {MAX_LINE} characters of subject and {MAX_BODY} of message."),
             );
         }
-        let topic = self.hub.store.edit(|db| {
-            db.board(board)?;
-            Some(db.add_topic(board, &self.key, subject, text, now()))
-        });
+        let topic = self
+            .hub
+            .store
+            .add_topic(board, &self.key, subject, text, now());
         let Some(topic) = topic else {
             return self.flash(out, "failure", "That board is gone.");
         };
@@ -1054,14 +1036,12 @@ impl Bbs {
         self.flash(out, "success", "Your topic is up.");
     }
 
-    fn draw_topic(&mut self, out: &mut Outbox, id: u64) {
-        let hub = self.hub.clone();
-        let db = hub.store.get();
-        let Some(t) = db.topic(id) else {
-            drop(db);
+    fn draw_topic(&mut self, out: &mut Outbox, id: TopicId) {
+        let Some(t) = self.hub.store.topic(id) else {
             return self.draw_gone(out, "This topic is gone.", Screen::Boards);
         };
-        let board = db.board(t.board).map_or("", |b| &b.name);
+        let board = self.hub.store.board(t.board).map_or_else(String::new, |b| b.name);
+        let board = board.as_str();
         heading(out, "topic_h", "body", &t.subject);
         out.element(caption("topic_about", "body", &format!("in {board}")));
         out.element(ui::column("posts").parent("body"));
@@ -1077,48 +1057,43 @@ impl Bbs {
             "reply_card",
             "Post reply",
             "primary",
-            Handler::action("reply").payload(id),
+            Handler::action("reply").payload(id.0),
         ));
         back(out, Screen::Board { id: t.board }, &format!("Back to {board}"));
     }
 
     /// The topic's posts, oldest first. What is on screen counts as read.
-    fn sync_topic(&mut self, out: &mut Outbox, id: u64) {
+    fn sync_topic(&mut self, out: &mut Outbox, id: TopicId) {
         let sysop = self.hub.is_sysop(&self.key);
         let hub = self.hub.clone();
-        let db = hub.store.get();
-        let Some(last) = db.topic(id).map(|t| t.last_post) else {
-            drop(db);
+        let store = &hub.store;
+        let Some(last) = store.topic(id).map(|t| t.last_post) else {
             return self.lost(out);
         };
-        let want: Vec<_> = db.posts_of(id).map(|p| (format!("p{}", p.id), p)).collect();
+        let want: Vec<_> = store
+            .posts_of(id)
+            .into_iter()
+            .map(|p| (format!("p{}", p.id.0), p))
+            .collect();
         let key = &self.key;
         reconcile(out, &mut self.items, &want, |p| {
-            post_item(&db, p, sysop || p.author == *key)
+            post_item(store, p, sysop || p.author == *key)
         });
-        let seen = db.user(key).and_then(|u| u.last_read.get(&id).copied());
-        drop(db);
+        let seen = store.user(key).and_then(|u| u.last_read.get(&id).copied());
         if seen != Some(last) {
-            self.hub.store.edit(|db| {
-                if let Some(u) = db.users.get_mut(&self.key) {
-                    u.last_read.insert(id, last);
-                }
-            });
+            store.mark_read(&self.key, id, last);
             self.sync_globals(out);
         }
     }
 
-    fn reply(&mut self, out: &mut Outbox, topic: u64, text: &str) {
+    fn reply(&mut self, out: &mut Outbox, topic: TopicId, text: &str) {
         if text.is_empty() {
             return self.flash(out, "failure", "Type a reply first.");
         }
         if text.chars().count() > MAX_BODY {
             return self.flash(out, "failure", &format!("At most {MAX_BODY} characters."));
         }
-        let posted = self.hub.store.edit(|db| {
-            db.topic(topic)?;
-            Some(db.add_post(topic, &self.key, text, now()))
-        });
+        let posted = self.hub.store.add_post(topic, &self.key, text, now());
         if posted.is_none() {
             return self.flash(out, "failure", "That topic is gone.");
         }
@@ -1126,17 +1101,12 @@ impl Bbs {
         self.changed(out);
     }
 
-    fn delete_post(&mut self, out: &mut Outbox, post: u64) {
+    fn delete_post(&mut self, out: &mut Outbox, post: PostId) {
         let sysop = self.hub.is_sysop(&self.key);
-        let done = self.hub.store.edit(|db| {
-            let p = db.posts.iter().find(|p| p.id == post)?;
-            if !sysop && p.author != self.key {
-                return None;
-            }
-            let board = db.topic(p.topic)?.board;
-            let (_, topic_gone) = db.delete_post(post)?;
-            Some((board, topic_gone))
-        });
+        let done = self
+            .hub
+            .store
+            .delete_post(post, |p| sysop || p.author == self.key);
         let Some((board, topic_gone)) = done else {
             return;
         };
@@ -1257,7 +1227,7 @@ impl Bbs {
         if text.chars().count() > MAX_LINE {
             return self.flash(out, "failure", &format!("One line, {MAX_LINE} characters at most."));
         }
-        self.hub.store.edit(|db| db.add_oneliner(&self.key, text, now()));
+        self.hub.store.add_oneliner(&self.key, text, now());
         out.signal(json!({"f": {"oneliner": ""}}));
         self.changed(out);
     }
@@ -1273,12 +1243,12 @@ impl Bbs {
         let nodes = self.hub.nodes.lock().unwrap().clone();
         let mut who = Map::new();
         {
-            let db = self.hub.store.get();
             for (n, node) in &nodes {
                 let name = if node.handle.is_empty() {
                     "A new caller".to_owned()
                 } else {
-                    match db.user(&node.key).map(|u| &u.location).filter(|l| !l.is_empty()) {
+                    let user = self.hub.store.user(&node.key);
+                    match user.map(|u| u.location).filter(|l| !l.is_empty()) {
                         Some(from) => format!("{} from {from}", node.handle),
                         None => node.handle.clone(),
                     }
@@ -1335,11 +1305,11 @@ impl Bbs {
     fn sync_users(&mut self, out: &mut Outbox) {
         let sysop = self.hub.is_sysop(&self.key);
         let hub = self.hub.clone();
-        let db = hub.store.get();
-        let mut users: Vec<_> = db.users.iter().collect();
-        users.sort_by_key(|(_, u)| u.handle.to_lowercase());
+        let mut users = hub.store.users();
+        users.sort_by_key(|u| u.handle.to_lowercase());
         let mut view = Map::new();
-        for (key, u) in &users {
+        for u in &users {
+            let key = &u.key.0;
             let mut about = Vec::new();
             if !u.location.is_empty() {
                 about.push(u.location.clone());
@@ -1358,31 +1328,27 @@ impl Bbs {
         self.put(out, json!({"_v": {"count": users.len(), "users": view}}));
         let want: Vec<_> = users
             .into_iter()
-            .map(|(key, u)| (format!("u{key}"), (key, u)))
+            .map(|u| (format!("u{}", u.key.0), u))
             .collect();
         let me = &self.key;
-        reconcile(out, &mut self.items, &want, |(key, u)| {
-            user_item(key, u, *key == me, sysop)
+        reconcile(out, &mut self.items, &want, |u| {
+            user_item(u, u.key == *me, sysop)
         });
     }
 
     /// Pattern A of the server guide: the two buttons only ask, the reply
     /// carries the confirmed state (through `changed`) with the indicator
     /// reset.
-    fn ban(&mut self, out: &mut Outbox, key: &str, ban: bool) {
-        if key == self.key {
+    fn ban(&mut self, out: &mut Outbox, key: &UserKey, ban: bool) {
+        if *key == self.key {
             return self.flash(out, "failure", "You cannot ban yourself.");
         }
-        let handle = self.hub.store.edit(|db| {
-            let u = db.users.get_mut(key)?;
-            u.banned = ban;
-            Some(u.handle.clone())
-        });
+        let handle = self.hub.store.set_banned(key, ban);
         let Some(handle) = handle else {
             return;
         };
         if ban {
-            self.hub.emit(Event::Kick { key: key.into() });
+            self.hub.emit(Event::Kick { key: key.clone() });
         }
         self.changed(out);
         self.flash(
@@ -1393,21 +1359,21 @@ impl Bbs {
     }
 
     fn draw_callers(&mut self, out: &mut Outbox) {
-        let db = self.hub.store.get();
+        let store = &self.hub.store;
         heading(out, "callers_h", "body", "Last Callers");
         out.element(ui::list("callers").parent("body").empty("Nobody yet."));
         // A log that does not change while it is on screen.
-        for (i, c) in db.callers.iter().rev().take(20).enumerate() {
+        for (i, c) in store.callers().iter().rev().take(20).enumerate() {
             out.element(code(
                 &format!("caller{i}"),
                 "callers",
-                &format!("{}  node {:>2}  {}", when(c.at), c.node, caller_line(&db, &c.key)),
+                &format!("{}  node {:>2}  {}", when(c.at), c.node, caller_line(store, &c.key)),
             ));
         }
         out.element(caption(
             "callers_total",
             "body",
-            &format!("{} calls since the board went up.", db.calls),
+            &format!("{} calls since the board went up.", store.calls()),
         ));
         back(out, Screen::Menu, "Main menu");
     }
@@ -1432,25 +1398,26 @@ impl Bbs {
 
     fn sync_mail(&mut self, out: &mut Outbox) {
         let hub = self.hub.clone();
-        let db = hub.store.get();
-        let inbox = db.inbox(&self.key);
+        let inbox = hub.store.inbox(&self.key);
         let new: Map<String, Value> = inbox
             .iter()
-            .map(|l| (format!("l{}", l.id), (!l.read).into()))
+            .map(|l| (format!("l{}", l.id.0), (!l.read).into()))
             .collect();
         self.put(out, json!({"_v": {"new": new}}));
-        let want: Vec<_> = inbox.into_iter().map(|l| (format!("l{}", l.id), l)).collect();
-        reconcile(out, &mut self.items, &want, |l| letter_item(&db, l));
+        let want: Vec<_> = inbox.into_iter().map(|l| (format!("l{}", l.id.0), l)).collect();
+        reconcile(out, &mut self.items, &want, |l| letter_item(&hub.store, l));
     }
 
-    fn draw_letter(&mut self, out: &mut Outbox, id: u64) {
-        let letter = {
-            let db = self.hub.store.get();
-            db.mail
-                .iter()
-                .find(|l| l.id == id && l.to == self.key)
-                .map(|l| (l.clone(), db.handle(&l.from)))
-        };
+    fn draw_letter(&mut self, out: &mut Outbox, id: LetterId) {
+        let letter = self
+            .hub
+            .store
+            .letter(id)
+            .filter(|l| l.to == self.key)
+            .map(|l| {
+                let from = self.hub.store.handle(&l.from);
+                (l, from)
+            });
         let Some((l, from)) = letter else {
             return self.draw_gone(out, "This letter is gone.", Screen::Mail);
         };
@@ -1480,15 +1447,11 @@ impl Bbs {
             "letter_buttons",
             "Delete",
             "failure",
-            Handler::action("delete_mail").payload(id),
+            Handler::action("delete_mail").payload(id.0),
         ));
         out.element(nav("letter_back", "letter_buttons", "Back to the mailbox", Screen::Mail));
         if !l.read {
-            self.hub.store.edit(|db| {
-                if let Some(l) = db.mail.iter_mut().find(|l| l.id == id) {
-                    l.read = true;
-                }
-            });
+            self.hub.store.mark_letter_read(id);
         }
     }
 
@@ -1525,7 +1488,7 @@ impl Bbs {
     }
 
     fn send_mail(&mut self, out: &mut Outbox, to: &str, subject: &str, text: &str) {
-        let Some(to_key) = self.hub.store.get().find_handle(to).map(str::to_owned) else {
+        let Some(to_key) = self.hub.store.find_handle(to) else {
             return self.flash(out, "failure", &format!("Nobody here goes by {to:?}."));
         };
         if subject.is_empty() || text.is_empty() {
@@ -1538,28 +1501,17 @@ impl Bbs {
                 &format!("At most {MAX_LINE} characters of subject and {MAX_BODY} of message."),
             );
         }
-        let handle = self.hub.store.edit(|db| {
-            let id = db.next_id();
-            db.mail.push(Letter {
-                id,
-                from: self.key.clone(),
-                to: to_key.clone(),
-                subject: subject.into(),
-                body: text.into(),
-                at: now(),
-                read: false,
-            });
-            db.handle(&to_key)
-        });
+        let handle = self
+            .hub
+            .store
+            .send_letter(&self.key, &to_key, subject, text, now());
         self.hub.emit(Event::Mail { to: to_key });
         self.show(out, Screen::Mail);
         self.flash(out, "success", &format!("Your letter is on its way to {handle}."));
     }
 
-    fn delete_mail(&mut self, out: &mut Outbox, id: u64) {
-        self.hub
-            .store
-            .edit(|db| db.mail.retain(|l| l.id != id || l.to != self.key));
+    fn delete_mail(&mut self, out: &mut Outbox, id: LetterId) {
+        self.hub.store.delete_letter(id, &self.key);
         self.show(out, Screen::Mail);
         self.flash(out, "info", "Letter deleted.");
     }
@@ -1598,13 +1550,13 @@ impl Bbs {
 
     fn sync_bulletins(&mut self, out: &mut Outbox) {
         let sysop = self.hub.is_sysop(&self.key);
-        let hub = self.hub.clone();
-        let db = hub.store.get();
-        let want: Vec<_> = db
-            .bulletins
-            .iter()
+        let want: Vec<_> = self
+            .hub
+            .store
+            .bulletins()
+            .into_iter()
             .rev()
-            .map(|b| (format!("bull{}", b.id), b))
+            .map(|b| (format!("bull{}", b.id.0), b))
             .collect();
         reconcile(out, &mut self.items, &want, |b| bulletin_item(b, sysop));
     }
@@ -1613,15 +1565,9 @@ impl Bbs {
         if title.is_empty() || text.is_empty() {
             return self.flash(out, "failure", "A bulletin needs a title and a text.");
         }
-        self.hub.store.edit(|db| {
-            let id = db.next_id();
-            db.bulletins.push(Bulletin {
-                id,
-                title: title.chars().take(MAX_LINE).collect(),
-                body: text.chars().take(MAX_BODY).collect(),
-                at: now(),
-            });
-        });
+        let title: String = title.chars().take(MAX_LINE).collect();
+        let text: String = text.chars().take(MAX_BODY).collect();
+        self.hub.store.add_bulletin(&title, &text, now());
         out.signal(json!({"f": {"title": "", "body": ""}}));
         self.changed(out);
     }
@@ -1629,8 +1575,7 @@ impl Bbs {
     // The caller and the sysop.
 
     fn draw_profile(&mut self, out: &mut Outbox) {
-        let db = self.hub.store.get();
-        let Some(u) = db.user(&self.key) else {
+        let Some(u) = self.hub.store.user(&self.key) else {
             return;
         };
         heading(out, "prof_h", "body", "Your Profile");
@@ -1645,7 +1590,7 @@ impl Bbs {
         {
             out.element(body(&format!("prof{i}"), "prof_stats", line));
         }
-        out.element(caption("prof_key", "prof_stats", &format!("Key: {}", self.key)));
+        out.element(caption("prof_key", "prof_stats", &format!("Key: {}", self.key.0)));
         out.element(
             ui::input("prof_location")
                 .parent("body")
@@ -1673,12 +1618,7 @@ impl Bbs {
         if location.chars().count() > MAX_LINE || tagline.chars().count() > MAX_LINE {
             return self.flash(out, "failure", &format!("At most {MAX_LINE} characters each."));
         }
-        self.hub.store.edit(|db| {
-            if let Some(u) = db.users.get_mut(&self.key) {
-                u.location = location.into();
-                u.tagline = tagline.into();
-            }
-        });
+        self.hub.store.save_profile(&self.key, location, tagline);
         // The confirmed values, normalized (trimmed).
         out.signal(json!({"f": {"location": location, "tagline": tagline}}));
         self.changed(out);
@@ -1726,18 +1666,23 @@ impl Bbs {
     fn sync_sysop(&mut self, out: &mut Outbox) {
         let online = self.hub.online();
         let hub = self.hub.clone();
-        let db = hub.store.get();
+        let store = &hub.store;
+        let s = store.stats();
         let stats = format!(
             "users {}   topics {}   posts {}   letters {}   calls {}   online {online}",
-            db.users.len(),
-            db.topics.len(),
-            db.posts.len(),
-            db.mail.len(),
-            db.calls,
+            s.users,
+            s.topics,
+            s.posts,
+            s.letters,
+            store.calls(),
         );
         self.put(out, json!({"_v": {"stats": stats}}));
-        let want: Vec<_> = db.boards.iter().map(|b| (format!("sb{}", b.id), b)).collect();
-        reconcile(out, &mut self.items, &want, |b| sysop_board_item(b));
+        let want: Vec<_> = store
+            .boards()
+            .into_iter()
+            .map(|b| (format!("sb{}", b.id.0), b))
+            .collect();
+        reconcile(out, &mut self.items, &want, sysop_board_item);
     }
 
     fn new_board(&mut self, out: &mut Outbox, name: &str, desc: &str) {
@@ -1748,7 +1693,7 @@ impl Bbs {
                 &format!("A board needs a name; both fields have at most {MAX_LINE} characters."),
             );
         }
-        self.hub.store.edit(|db| db.add_board(name, desc));
+        self.hub.store.add_board(name, desc);
         out.signal(json!({"f": {"name": "", "desc": ""}}));
         self.changed(out);
         self.flash(out, "success", &format!("{name} is open."));
@@ -1769,7 +1714,8 @@ impl Bbs {
 
 impl Drop for Bbs {
     fn drop(&mut self) {
-        if self.screen == Screen::Chat && self.registered {
+        // Not while a panic (such as a storage error) unwinds the session.
+        if self.screen == Screen::Chat && self.registered && !std::thread::panicking() {
             self.hub.chat(
                 ChatKind::System,
                 &self.handle(),
@@ -1865,18 +1811,18 @@ fn diff(old: &Value, new: &Value) -> Option<Value> {
 
 // The rows of the lists, one builder each.
 
-fn oneliner_item(db: &Db, o: &Oneliner, list: &str, dated: bool) -> Element {
-    let line = format!("{:>width$}: {}", db.handle(&o.author), o.text, width = MAX_HANDLE);
+fn oneliner_item(store: &Store, o: &Oneliner, list: &str, dated: bool) -> Element {
+    let line = format!("{:>width$}: {}", store.handle(&o.author), o.text, width = MAX_HANDLE);
     let text = if dated {
         format!("{} {line}", short_date(o.at))
     } else {
         line
     };
-    code(&format!("o{}", o.id), list, &text)
+    code(&format!("o{}", o.id.0), list, &text)
 }
 
 fn board_item(b: &Board) -> Vec<Element> {
-    let row = format!("b{}", b.id);
+    let row = format!("b{}", b.id.0);
     vec![
         ui::row(&row).parent("boards").wrap(true),
         nav(&format!("{row}_go"), &row, &b.name, Screen::Board { id: b.id }),
@@ -1893,7 +1839,7 @@ fn board_item(b: &Board) -> Vec<Element> {
 }
 
 fn topic_item(t: &Topic) -> Vec<Element> {
-    let row = format!("t{}", t.id);
+    let row = format!("t{}", t.id.0);
     vec![
         ui::row(&row).parent("topics").wrap(true),
         ui::badge(format!("{row}_new"))
@@ -1910,22 +1856,22 @@ fn topic_item(t: &Topic) -> Vec<Element> {
 }
 
 /// A post never changes, so it is all literals.
-fn post_item(db: &Db, p: &Post, can_delete: bool) -> Vec<Element> {
-    let card = format!("p{}", p.id);
-    let author = db.user(&p.author);
+fn post_item(store: &Store, p: &Post, can_delete: bool) -> Vec<Element> {
+    let card = format!("p{}", p.id.0);
+    let author = store.user(&p.author);
     let mut els = vec![
         ui::card(&card)
             .parent("posts")
             .title(format!(
                 "Msg #{} · {} · {}",
-                p.id,
-                author.map_or("<unknown>", |u| &u.handle),
+                p.id.0,
+                author.as_ref().map_or("<unknown>", |u| &u.handle),
                 when(p.at)
             ))
             .gap("small"),
         body(&format!("{card}_body"), &card, &p.body),
     ];
-    if let Some(tag) = author.map(|u| &u.tagline).filter(|t| !t.is_empty()) {
+    if let Some(tag) = author.map(|u| u.tagline).filter(|t| !t.is_empty()) {
         els.push(caption(&format!("{card}_tag"), &card, &format!("-- {tag}")));
     }
     if can_delete {
@@ -1935,7 +1881,7 @@ fn post_item(db: &Db, p: &Post, can_delete: bool) -> Vec<Element> {
                 &card,
                 "Delete",
                 "plain",
-                Handler::action("delete_post").payload(p.id),
+                Handler::action("delete_post").payload(p.id.0),
             ),
         );
     }
@@ -1976,7 +1922,8 @@ fn node_item(n: u32) -> Vec<Element> {
     ]
 }
 
-fn user_item(key: &str, u: &User, me: bool, sysop: bool) -> Vec<Element> {
+fn user_item(u: &User, me: bool, sysop: bool) -> Vec<Element> {
+    let key = u.key.0.as_str();
     let row = format!("u{key}");
     let v = format!("s._v.users.{row}");
     let mut els = vec![
@@ -2028,8 +1975,8 @@ fn user_item(key: &str, u: &User, me: bool, sysop: bool) -> Vec<Element> {
     els
 }
 
-fn letter_item(db: &Db, l: &Letter) -> Vec<Element> {
-    let row = format!("l{}", l.id);
+fn letter_item(store: &Store, l: &Letter) -> Vec<Element> {
+    let row = format!("l{}", l.id.0);
     vec![
         ui::row(&row).parent("inbox").wrap(true),
         ui::badge(format!("{row}_new"))
@@ -2041,13 +1988,13 @@ fn letter_item(db: &Db, l: &Letter) -> Vec<Element> {
         caption(
             &format!("{row}_from"),
             &row,
-            &format!("from {} · {}", db.handle(&l.from), when(l.at)),
+            &format!("from {} · {}", store.handle(&l.from), when(l.at)),
         ),
     ]
 }
 
 fn bulletin_item(b: &Bulletin, sysop: bool) -> Vec<Element> {
-    let card = format!("bull{}", b.id);
+    let card = format!("bull{}", b.id.0);
     let mut els = vec![
         ui::card(&card).parent("bulls").title(b.title.as_str()).gap("small"),
         body(&format!("{card}_body"), &card, &b.body),
@@ -2059,14 +2006,14 @@ fn bulletin_item(b: &Bulletin, sysop: bool) -> Vec<Element> {
             &card,
             "Delete",
             "plain",
-            Handler::action("delete_bulletin").payload(b.id),
+            Handler::action("delete_bulletin").payload(b.id.0),
         ));
     }
     els
 }
 
 fn sysop_board_item(b: &Board) -> Vec<Element> {
-    let row = format!("sb{}", b.id);
+    let row = format!("sb{}", b.id.0);
     vec![
         ui::row(&row).parent("sys_board_list"),
         body(&format!("{row}_name"), &row, &b.name),
@@ -2075,7 +2022,7 @@ fn sysop_board_item(b: &Board) -> Vec<Element> {
             &row,
             "Delete with all its posts",
             "failure",
-            Handler::action("delete_board").payload(b.id),
+            Handler::action("delete_board").payload(b.id.0),
         ),
     ]
 }
@@ -2134,10 +2081,10 @@ fn hm(ts: i64) -> String {
 }
 
 /// "handle from location".
-fn caller_line(db: &Db, key: &str) -> String {
-    match db.user(key) {
+fn caller_line(store: &Store, key: &UserKey) -> String {
+    match store.user(key) {
         Some(u) if !u.location.is_empty() => format!("{} from {}", u.handle, u.location),
-        Some(u) => u.handle.clone(),
+        Some(u) => u.handle,
         None => "<unknown>".into(),
     }
 }

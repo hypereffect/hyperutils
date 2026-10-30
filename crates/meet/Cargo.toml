@@ -12,6 +12,8 @@ hypereffect.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal"] }
 clap.workspace = true
 getrandom = "0.2"
+orangedb.workspace = true
 
 [dev-dependencies]
 hypereffect = { workspace = true, features = ["client"] }
+tempfile = "3"
