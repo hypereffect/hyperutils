@@ -1,6 +1,6 @@
 //! The rooms, who is in them and what they voted, in an [orangedb] database.
 //! Managers and players are keyed by the hex of the renderer's public key,
-//! which is never shown.
+//! which is never shown; only its salted [`tag`](crate::poker::tag) is.
 //!
 //! A storage error is nothing a visitor can fix, so [`read`] and [`write`]
 //! panic on one: that ends the session it happened in, which runs in its own
@@ -46,6 +46,18 @@ pub mod schema {
         pub key: OwnerKey,
         #[references(Room, on_delete = set_null)]
         pub rooms: Vec<RoomId>,
+    }
+
+    /// The name a key last joined a room under, offered when it opens another
+    /// one, from whichever device.
+    #[entity(accessor = people)]
+    #[derive(Clone, Debug)]
+    pub struct Person {
+        #[id(String)]
+        pub key: PersonKey,
+        pub name: String,
+        /// When they last joined or renamed, in seconds since the epoch.
+        pub touched: u64,
     }
 }
 

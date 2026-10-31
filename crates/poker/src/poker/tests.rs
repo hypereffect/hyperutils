@@ -77,7 +77,8 @@ impl Loopback {
         self.client.value(path).cloned().unwrap_or(Value::Null)
     }
 
-    /// Each player row as “name: badge”.
+    /// Each player row as “name: badge”, with the tag after the name, which
+    /// must be there, left out.
     fn players(&self) -> Vec<String> {
         self.client
             .children(Some("players"))
@@ -85,7 +86,7 @@ impl Loopback {
             .map(|id| {
                 format!(
                     "{}: {}",
-                    self.text(&format!("{id}_name")),
+                    untagged(&self.text(&format!("{id}_name"))),
                     self.text(&format!("{id}_vote"))
                 )
             })
@@ -101,6 +102,14 @@ impl Loopback {
         self.write("vote", value);
         self.press("vote_btn");
     }
+}
+
+/// “Ann · 1a2b3c4d (you)” as “Ann (you)”.
+fn untagged(name: &str) -> String {
+    let (name, rest) = name.split_once(" · ").expect("a name has its tag");
+    let (tag, rest) = rest.split_at(TAG_LEN);
+    assert!(tag.chars().all(|c| c.is_ascii_hexdigit()), "{tag}");
+    format!("{name}{rest}")
 }
 
 fn db() -> Arc<Db> {
@@ -257,7 +266,7 @@ fn the_manager_runs_the_room() {
         .client
         .children(Some("players"))
         .iter()
-        .find(|id| m.text(&format!("{id}_name")) == "Bob")
+        .find(|id| untagged(&m.text(&format!("{id}_name"))) == "Bob")
         .unwrap()
         .to_string();
     m.press(&format!("{bob_row}_remove"));
@@ -310,7 +319,10 @@ fn players_come_back_with_their_key() {
 
     let ann = connect(&db, key, &path);
     assert!(!ann.visible("join_card"));
-    assert_eq!(ann.text("me_caption"), "You are in as Ann.");
+    assert_eq!(
+        ann.text("me_caption"),
+        format!("You are in as Ann · {}.", tag(&key))
+    );
     assert_eq!(ann.value("vote"), json!("13"));
     assert_eq!(ann.players(), ["Ann (you): voted", "Bob: thinking…"]);
 
@@ -323,6 +335,75 @@ fn players_come_back_with_their_key() {
     );
     m.press("mine_0");
     assert!(m.visible("reveal_row"));
+}
+
+#[test]
+fn the_name_goes_with_the_key() {
+    let db = db();
+    let (mut m, path) = open(&db);
+    let max = m.app.viewer;
+    assert_eq!(m.value("name"), json!(""));
+    m.join("Max");
+
+    // The same manager on another device, with the same key: still in.
+    let other = connect(&db, max, &path);
+    assert!(!other.visible("join_card"));
+    assert_eq!(other.players(), ["Max (you): in"]);
+
+    // And in their next room, the name is filled in already.
+    let mut other = connect(&db, max, "/");
+    other.press("create_btn");
+    assert!(other.visible("join_card"));
+    assert_eq!(other.value("name"), json!("Max"));
+    other.press("join_btn");
+    assert_eq!(other.players(), ["Max (you): in"]);
+    let next = other.value("room.link").as_str().unwrap()["hyperb://poker.test".len()..].to_owned();
+
+    // A player's too, and after a rename it is the new name.
+    let mut ann = connect(&db, person(), &path);
+    assert_eq!(ann.value("name"), json!(""));
+    ann.join("Ann");
+    ann.write("name", json!("Annie"));
+    ann.forge("join");
+    let ann = connect(&db, ann.app.viewer, &next);
+    assert!(ann.visible("join_card"));
+    assert_eq!(ann.value("name"), json!("Annie"));
+}
+
+#[test]
+fn same_names_tell_apart_by_tag() {
+    let db = db();
+    let (mut m, path) = open(&db);
+    let (k1, k2) = (person(), person());
+    connect(&db, k1, &path).join("Sam");
+    connect(&db, k2, &path).join("Sam");
+    m.tick();
+    let names: Vec<String> = m
+        .client
+        .children(Some("players"))
+        .iter()
+        .map(|id| m.text(&format!("{id}_name")))
+        .collect();
+    assert_eq!(
+        names,
+        [format!("Sam · {}", tag(&k1)), format!("Sam · {}", tag(&k2))]
+    );
+    assert!(
+        m.text("tag_caption")
+            .ends_with(&format!("{}.", tag(&m.app.viewer)))
+    );
+}
+
+#[test]
+fn tags_are_short_salted_and_stable() {
+    let key = person();
+    let t = tag(&key);
+    assert_eq!(t.len(), 8);
+    assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_eq!(t, tag(&key));
+    assert_ne!(t, tag(&person()));
+    assert_ne!(t, blake3::hash(&key.to_bytes()).to_hex()[..8]);
+    assert!(!key.to_string().starts_with(&t));
 }
 
 #[test]
@@ -371,6 +452,15 @@ fn unknown_links_and_old_rooms() {
     db.rooms().update(&r).unwrap();
     assert_eq!(prune(&db), 1);
     assert!(db.owners().all().unwrap().is_empty());
+
+    // A name nobody used for as long is forgotten too.
+    let (mut m, _) = open(&db);
+    m.join("Max");
+    let mut p = db.people().all().unwrap().remove(0);
+    p.touched -= IDLE;
+    db.people().update(&p).unwrap();
+    prune(&db);
+    assert!(db.people().all().unwrap().is_empty());
 }
 
 #[test]

@@ -10,13 +10,17 @@
 //!
 //! People are recognized by their key: whoever comes back with the same key
 //! is still in the room, with their vote, and only the key that opened a
-//! room can run its rounds.
+//! room can run its rounds. The name a key joins under goes with the key, so
+//! it is offered again in the next room, on any device. Every name is shown
+//! with the [`tag`] of its key, so two people of the same name can be told
+//! apart.
 //!
 //! A session watches the room it has open on its tick, so votes and reveals
 //! show up within a second.
 
 use crate::store::{
-    self, Db, Owner, OwnerKey, Player, Room, RoomId, Round, Summary, Vote, WriteTx,
+    self, Db, Owner, OwnerKey, Person, PersonKey, Player, Room, RoomId, Round, Summary, Vote,
+    WriteTx,
 };
 use hyperb_core::identity::PublicKey;
 use hypereffect::{Action, App, Element, Handler, Metadata, Outbox, Value, cel, json, ui};
@@ -38,8 +42,31 @@ const MAX_OWNED: usize = 50;
 /// How long a room is kept without a change.
 const IDLE: u64 = 30 * 24 * 60 * 60;
 const DEFAULT_TITLE: &str = "Planning poker";
+/// Hashed in front of a key to make its tag, so that tags here cannot be
+/// matched against hashes of the same key elsewhere.
+const SALT: &[u8] = b"hyperutils poker: who is at the table";
+/// How many hex digits of the hash make a tag.
+const TAG_LEN: usize = 8;
 
-/// Deletes the rooms nobody used for [`IDLE`], and owners left with none.
+/// What is shown with the name of `key`: the first [`TAG_LEN`] hex digits of
+/// the BLAKE3 hash of [`SALT`] and the key.
+pub fn tag(key: &PublicKey) -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(SALT);
+    h.update(&key.to_bytes());
+    h.finalize().to_hex()[..TAG_LEN].to_owned()
+}
+
+/// “Ann · 1a2b3c4d”, for the key stored as `key`.
+fn named(name: &str, key: &str) -> String {
+    match key.parse::<PublicKey>() {
+        Ok(k) => format!("{name} · {}", tag(&k)),
+        Err(_) => name.to_owned(),
+    }
+}
+
+/// Deletes the rooms nobody used for [`IDLE`], owners left with none, and
+/// the names of keys that did not join anything for as long.
 /// Returns how many rooms went.
 pub fn prune(db: &Db) -> usize {
     let cutoff = store::now().saturating_sub(IDLE);
@@ -54,6 +81,11 @@ pub fn prune(db: &Db) -> usize {
         for o in tx.owners().all()? {
             if o.rooms.is_empty() {
                 tx.owners().delete(&o.key)?;
+            }
+        }
+        for p in tx.people().all()? {
+            if p.touched <= cutoff {
+                tx.people().delete(&p.key)?;
             }
         }
         Ok(n)
@@ -196,8 +228,9 @@ fn must_own(r: &Room, me: &str) -> Result<(), String> {
 
 pub struct Poker {
     db: Arc<Db>,
-    /// The key of this session.
+    /// The key of this session, and its tag.
     viewer: PublicKey,
+    tag: String,
     /// `hyperb://<host>`, to write links with.
     origin: String,
     /// Where the address pointed, for the hello.
@@ -219,6 +252,7 @@ impl Poker {
     pub fn new(db: Arc<Db>, viewer: PublicKey, origin: &str, path: &str) -> Self {
         Poker {
             db,
+            tag: tag(&viewer),
             viewer,
             origin: origin.trim_end_matches('/').to_owned(),
             route: Route::parse(path),
@@ -349,6 +383,12 @@ impl Poker {
         };
         if self.open.as_ref() != Some(&r.id) {
             self.show(out, View::Room);
+            // The name this key joined under before, here or anywhere, so
+            // that it need not be typed again.
+            let known = store::read(&self.db, |tx| tx.people().get(PersonKey::new(self.me())));
+            if let Some(p) = known {
+                out.signal(json!({"name": p.name}));
+            }
         }
         self.open = Some(r.id.clone());
         self.render(out, &r);
@@ -403,7 +443,10 @@ impl Poker {
             "link": format!("{}/{}", self.origin, r.id.0),
             "is_owner": is_owner,
             "joined": player.is_some(),
-            "me": player.map_or(String::new(), |p| format!("You are in as {}.", p.name)),
+            "me": player.map_or(String::new(), |p| {
+                format!("You are in as {} · {}.", p.name, self.tag)
+            }),
+            "tag": format!("Your name is shown with your tag, {}.", self.tag),
             "phase": phase,
             "heading": round.map_or(String::new(), |x| heading(x.number, &x.topic)),
             "progress": format!("{count} of {} voted", r.players.len()),
@@ -448,11 +491,10 @@ impl Poker {
             }
         };
         for p in &r.players {
-            let name = if p.key == me {
-                format!("{} (you)", p.name)
-            } else {
-                p.name.clone()
-            };
+            let mut name = named(&p.name, &p.key);
+            if p.key == me {
+                name.push_str(" (you)");
+            }
             let badge = match (phase, voted(&p.key)) {
                 ("waiting", _) => ("in".to_owned(), "neutral"),
                 ("voting", Some(_)) => ("voted".to_owned(), "success"),
@@ -470,7 +512,7 @@ impl Poker {
             for (k, v) in gone.enumerate() {
                 row(
                     format!("gone{k}"),
-                    format!("{} (left)", v.name),
+                    format!("{} (left)", named(&v.name, &v.key)),
                     (number(v.value), "info"),
                     None,
                 );
@@ -535,13 +577,14 @@ impl Poker {
         }
     }
 
-    /// Joins the room under the name typed in, or renames the player.
+    /// Joins the room under the name typed in, or renames the player. The
+    /// name is kept for the key, for the next room it opens.
     fn join(&mut self, out: &mut Outbox, action: &Action) {
         let name = limit(&text(action, "name"), MAX_NAME_LEN);
         if name.is_empty() {
             return out.signal(feedback("failure", "Type your name first."));
         }
-        self.change(out, |r, me| {
+        let joined = self.change(out, |r, me| {
             if let Some(p) = r.players.iter_mut().find(|p| p.key == me) {
                 p.name = name.clone();
                 return Ok(format!("You are now {name}."));
@@ -557,6 +600,16 @@ impl Poker {
             r.next_id += 1;
             Ok(format!("Welcome, {name}."))
         });
+        if joined {
+            let me = self.me();
+            store::write(&self.db, |tx| {
+                tx.people().upsert(&Person {
+                    key: PersonKey::new(me),
+                    name,
+                    touched: store::now(),
+                })
+            });
+        }
     }
 
     fn vote(&mut self, out: &mut Outbox, action: &Action) {
@@ -690,7 +743,7 @@ fn new_id(tx: &WriteTx) -> orangedb::Result<RoomId> {
 
 impl App for Poker {
     fn hello(&mut self, out: &mut Outbox, _: &BTreeMap<String, String>) {
-        out.metadata(Metadata::new().name("poker").description(
+        out.metadata(Metadata::new().name("planning poker").description(
             "Planning poker: everyone estimates, nobody sees a number until all are in",
         ));
         out.signal(json!({
@@ -698,7 +751,7 @@ impl App for Poker {
             "has_mine": false,
             "feedback": {"kind": "info", "text": ""},
             "draft": {"title": ""},
-            "room": {"title": "", "link": "", "is_owner": false, "joined": false, "me": "",
+            "room": {"title": "", "link": "", "is_owner": false, "joined": false, "me": "", "tag": "",
                      "phase": "waiting", "heading": "", "progress": "", "mine": "",
                      "result": "", "start": "", "has_history": false},
             "name": "",
@@ -711,7 +764,7 @@ impl App for Poker {
             ui::text("app_title")
                 .parent("top")
                 .variant("h1")
-                .text("poker"),
+                .text("Planning poker"),
         );
         out.element(
             ui::button("home_btn")
@@ -832,6 +885,12 @@ impl App for Poker {
                 .label("Join")
                 .variant("primary")
                 .on_press(Handler::action("join")),
+        );
+        out.element(
+            ui::text("tag_caption")
+                .parent("join_card")
+                .variant("caption")
+                .text(cel("s.room.tag")),
         );
         out.element(
             ui::text("me_caption")
