@@ -22,6 +22,18 @@ forms *args:
 tournament *args:
     cargo run --release -p tournament -- {{args}}
 
+# Run the knockout brackets on 127.0.0.1:8407.
+bracket *args:
+    cargo run --release -p bracket -- {{args}}
+
 # Run the sign-up sheets on 127.0.0.1:8405.
 signup *args:
     cargo run --release -p signup -- {{args}}
+
+# Run planning poker on 127.0.0.1:8406.
+poker *args:
+    cargo run --release -p poker -- {{args}}
+
+# Run the judged contests on 127.0.0.1:8408.
+judging *args:
+    cargo run --release -p judging -- {{args}}

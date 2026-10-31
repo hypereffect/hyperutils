@@ -12,7 +12,10 @@ their public key, which the transport proves, so there are no logins.
 | `meet`       | A Doodle-style scheduler. Share a code, mark the times that suit you, see answers live. | `127.0.0.1:8402` |
 | `forms`      | A form builder. Share `/<id>`, collect answers, read them at `/<id>/results`. Forms expire after 1 day to 1 month. | `127.0.0.1:8403` |
 | `tournament` | Round-robin fixtures and standings. One link enters results, another only shows them. | `127.0.0.1:8404` |
+| `bracket`    | Knockout brackets: round of 16, quarterfinals and so on. Place the teams you want, the draw places the rest; one link enters results, another only shows them. | `127.0.0.1:8407` |
 | `signup`     | Sign-up sheets. List the roles or things needed, share the link, people put their names down, each shown with a tag of who wrote it. | `127.0.0.1:8405` |
+| `poker`      | Planning poker. Open a room, share the link, start each round; numbers stay hidden until everyone has voted or the manager reveals them. | `127.0.0.1:8406` |
+| `judging`    | Judged contests. Each judge gets a link that knows their name and scores privately; high and low are dropped, and a leaderboard appears when the organizer reveals it. | `127.0.0.1:8408` |
 | `hyperserve` | The library they share: the HTTP(S) and iroh transports, and `run_app`.             |                  |
 
 ## Running

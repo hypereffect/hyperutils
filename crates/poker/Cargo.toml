@@ -1,0 +1,19 @@
+[package]
+name = "poker"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+description = "Planning poker for hyperb: open a room, share the link, run estimation rounds live and reveal everyone's numbers at once"
+
+[dependencies]
+hyperserve.workspace = true
+hyperb-core.workspace = true
+hypereffect.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal"] }
+clap.workspace = true
+serde.workspace = true
+orangedb.workspace = true
+cuid2 = "0.1"
+
+[dev-dependencies]
+hypereffect = { workspace = true, features = ["client"] }

@@ -1,0 +1,19 @@
+[package]
+name = "judging"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+description = "Judged contests for hyperb: each judge gets their own link and scores privately, high and low are dropped, a leaderboard appears"
+
+[dependencies]
+hyperserve.workspace = true
+hyperb-core.workspace = true
+hypereffect.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal"] }
+clap.workspace = true
+serde.workspace = true
+orangedb.workspace = true
+cuid2 = "0.1"
+
+[dev-dependencies]
+hypereffect = { workspace = true, features = ["client"] }
