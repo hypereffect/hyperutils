@@ -21,3 +21,7 @@ forms *args:
 # Run the round-robin tournament maker on 127.0.0.1:8404.
 tournament *args:
     cargo run --release -p tournament -- {{args}}
+
+# Run the sign-up sheets on 127.0.0.1:8405.
+signup *args:
+    cargo run --release -p signup -- {{args}}

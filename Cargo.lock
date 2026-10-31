@@ -3526,6 +3526,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "signup"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "clap",
+ "cuid2",
+ "hyperb-core",
+ "hypereffect",
+ "hyperserve",
+ "orangedb",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "simd_cesu8"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

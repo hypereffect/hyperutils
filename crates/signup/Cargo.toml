@@ -1,0 +1,20 @@
+[package]
+name = "signup"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+description = "Sign-up sheets for hyperb: list the roles or things needed, share the link, and people put their names down"
+
+[dependencies]
+hyperserve.workspace = true
+hyperb-core.workspace = true
+hypereffect.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal"] }
+clap.workspace = true
+serde.workspace = true
+orangedb.workspace = true
+cuid2 = "0.1"
+blake3 = "1"
+
+[dev-dependencies]
+hypereffect = { workspace = true, features = ["client"] }
