@@ -49,8 +49,7 @@ A server that also needs to react to things outside the session (as the BBS
 does with its shared events) can read `session.input` and write
 `session.output` directly. See `crates/bbs/src/session.rs`.
 
-`hyperb-core` is a path dependency on `../hyperb`, so that repository has to
-be checked out next to this one.
+`hyperb-core` comes from crates.io, so no sibling `hyperb` checkout is needed.
 
 ## Releases
 
@@ -68,7 +67,6 @@ by hand — the matrix comes from `cargo metadata`, so a new crate under `crates
 ships with the next tag. The library crate (`hyperserve`) has no binary and is
 skipped.
 
-CI clones hyperb into `../hyperb` from `<owner>/hyperb` on `main`; override with
-the `HYPERB_REPO` / `HYPERB_REF` repository variables, and set a `HYPERB_TOKEN`
-secret if that repository is private. A manual `workflow_dispatch` run builds
-the same binaries as run artifacts, without a release.
+CI builds on native runners for each architecture, so no cross toolchain is
+needed. A manual `workflow_dispatch` run builds the same binaries as run
+artifacts, without a release.
