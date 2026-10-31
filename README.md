@@ -11,6 +11,7 @@ their public key, which the transport proves, so there are no logins.
 | `bbs`        | An old-school bulletin board: message boards, mail, teleconference. Also on iroh.   | `127.0.0.1:8401` |
 | `meet`       | A Doodle-style scheduler. Share a code, mark the times that suit you, see answers live. | `127.0.0.1:8402` |
 | `forms`      | A form builder. Share `/<id>`, collect answers, read them at `/<id>/results`. Forms expire after 1 day to 1 month. | `127.0.0.1:8403` |
+| `tournament` | Round-robin fixtures and standings. One link enters results, another only shows them. | `127.0.0.1:8404` |
 | `hyperserve` | The library they share: the HTTP(S) and iroh transports, and `run_app`.             |                  |
 
 ## Running

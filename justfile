@@ -17,3 +17,7 @@ meet *args:
 # Run the form builder on 127.0.0.1:8403.
 forms *args:
     cargo run --release -p forms -- {{args}}
+
+# Run the round-robin tournament maker on 127.0.0.1:8404.
+tournament *args:
+    cargo run --release -p tournament -- {{args}}

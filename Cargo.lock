@@ -3954,6 +3954,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tournament"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "cuid2",
+ "hyperb-core",
+ "hypereffect",
+ "hyperserve",
+ "orangedb",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "tower"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
