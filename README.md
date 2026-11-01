@@ -1,75 +1,33 @@
 # hyperutils
 
-Small servers that each offer one useful service as a
-[hypereffect](https://crates.io/crates/hypereffect) app, for the
-[hyperb](../hyperb) browser. Each one is its own crate under `crates/`, and
-they all answer at `hyperb://<host>` over HTTPS. Callers are recognized by
-their public key, which the transport proves, so there are no logins.
+Small, deliberately unglamorous tools for the everyday problems that come up
+when people have to organise things together.
 
-| Crate        | What it is                                                                          | Default listen   |
-| ------------ | ----------------------------------------------------------------------------------- | ---------------- |
-| `bbs`        | An old-school bulletin board: message boards, mail, teleconference. Also on iroh.   | `127.0.0.1:8401` |
-| `meet`       | A Doodle-style scheduler. Share a code, mark the times that suit you, see answers live. | `127.0.0.1:8402` |
-| `forms`      | A form builder. Share `/<id>`, collect answers, read them at `/<id>/results`. Forms expire after 1 day to 1 month. | `127.0.0.1:8403` |
-| `tournament` | Round-robin fixtures and standings. One link enters results, another only shows them. | `127.0.0.1:8404` |
-| `bracket`    | Knockout brackets: round of 16, quarterfinals and so on. Place the teams you want, the draw places the rest; one link enters results, another only shows them. | `127.0.0.1:8407` |
-| `signup`     | Sign-up sheets. List the roles or things needed, share the link, people put their names down, each shown with a tag of who wrote it. | `127.0.0.1:8405` |
-| `poker`      | Planning poker. Open a room, share the link, start each round; numbers stay hidden until everyone has voted or the manager reveals them. | `127.0.0.1:8406` |
-| `judging`    | Judged contests. Each judge gets a link that knows their name and scores privately; high and low are dropped, and a leaderboard appears when the organizer reveals it. | `127.0.0.1:8408` |
-| `hyperserve` | The library they share: the HTTP(S) and iroh transports, and `run_app`.             |                  |
+Not every problem needs a startup. Sometimes you just need a sign-up sheet, a
+way to find a time everyone can meet, or somewhere to write down the results of
+a tournament. These tools are for exactly those jobs — the boring, mundane,
+real-world kind that still need solving. Each one does a single useful thing,
+and they are meant to be shared with a link and used without creating an
+account or remembering a password.
 
-## Running
+## The tools
 
-```
-cargo run --release -p meet -- --listen 0.0.0.0:443 --tls-cert fullchain.pem --tls-key privkey.pem
-```
-
-Renderers use `https` for every host except `localhost` and IP addresses. So a
-public server either gets `--tls-cert` and `--tls-key`, or runs on plain HTTP
-behind a proxy that terminates TLS. The certificate is read again every 12
-hours, so renewals take effect without a restart. Opening the address in a web
-browser shows a page that links to it in hyperb.
-
-`--help` on each binary lists its other options.
-
-## Adding a server
-
-Make a new crate under `crates/` that depends on `hyperserve`. Write the app
-as a `hypereffect::App`, build it from the caller's key, and serve it:
-
-```rust
-hyperserve::http::serve("name", listen, &tls, |session| {
-    let app = MyApp::new(session.key);
-    hyperserve::run_app(session, app)
-})
-```
-
-`session.path` is the path of the address the caller opened, and
-`session.origin` is `hyperb://<host>[:port]` as they dialed it, so an app can
-route on its path and write links to itself (see `crates/forms`).
-
-A server that also needs to react to things outside the session (as the BBS
-does with its shared events) can read `session.input` and write
-`session.output` directly. See `crates/bbs/src/session.rs`.
-
-`hyperb-core` comes from crates.io, so no sibling `hyperb` checkout is needed.
-
-## Releases
-
-Tag to publish:
-
-```
-git tag v0.1.0 && git push origin v0.1.0
-```
-
-`.github/workflows/publish.yml` then builds every binary crate in the workspace
-as a static musl executable (`x86_64-unknown-linux-musl`,
-`aarch64-unknown-linux-musl`) and attaches `bbs-v0.1.0-<target>`, its
-`.sha256`, and a combined `SHA256SUMS` to the release. Nothing lists the crates
-by hand — the matrix comes from `cargo metadata`, so a new crate under `crates/`
-ships with the next tag. The library crate (`hyperserve`) has no binary and is
-skipped.
-
-CI builds on native runners for each architecture, so no cross toolchain is
-needed. A manual `workflow_dispatch` run builds the same binaries as run
-artifacts, without a release.
+- **Bulletin board** — an old-school message board for discussions, private
+  messages, and live chat.
+- **Meeting planner** — a Doodle-style scheduler. Share a code, mark the times
+  that suit you, and see everyone's answers update live.
+- **Forms** — build a form, share it, and read the answers as they come in.
+  Forms can be set to expire after anywhere from a day to a month.
+- **Round-robin tournament** — fixtures and standings for a league or group.
+  One link is for entering results, another is read-only for everyone else.
+- **Knockout bracket** — round of 16, quarterfinals, and so on. Place the teams
+  you want and let the draw handle the rest; again, one link for entering
+  results and one for following along.
+- **Sign-up sheet** — list the roles or things you need, share the link, and
+  people put their names down, with each entry showing who wrote it.
+- **Planning poker** — open a room, share the link, and start each round.
+  Estimates stay hidden until everyone has voted or the person running it
+  reveals them.
+- **Judged contests** — each judge gets a private link that knows their name.
+  The highest and lowest scores are dropped, and a leaderboard appears when the
+  organiser chooses to reveal it.
