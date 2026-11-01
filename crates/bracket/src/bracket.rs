@@ -378,10 +378,12 @@ fn read_pick(action: &Action, k: usize, teams: usize) -> Pick {
     }
 }
 
+/// The score signal: numbers, as number inputs bind them, or nothing when
+/// the match has no result.
 fn score_signal(score: Option<[u32; 2]>) -> Value {
     match score {
-        Some([h, a]) => json!({"h": h.to_string(), "a": a.to_string()}),
-        None => json!({"h": "", "a": ""}),
+        Some([h, a]) => json!({"h": h, "a": a}),
+        None => json!({"h": null, "a": null}),
     }
 }
 
@@ -434,10 +436,12 @@ pub struct Brackets {
     /// The scores on screen, by match, so that a refresh only resets the
     /// inputs of the matches whose result changed.
     shown: Vec<Option<[u32; 2]>>,
-    /// Ids of the elements that are replaced as a whole.
-    mine_ids: Vec<String>,
-    seed_ids: Vec<String>,
-    round_ids: Vec<String>,
+    /// The elements sent last, so that a refresh re-sends only what changed.
+    mine: Vec<Element>,
+    seed: Vec<Element>,
+    rounds: Vec<Element>,
+    /// The `t` signal last shown, so that an unchanged bracket stays silent.
+    shown_t: Option<Value>,
 }
 
 impl Brackets {
@@ -453,9 +457,10 @@ impl Brackets {
             can_edit: false,
             seen: 0,
             shown: Vec::new(),
-            mine_ids: Vec::new(),
-            seed_ids: Vec::new(),
-            round_ids: Vec::new(),
+            mine: Vec::new(),
+            seed: Vec::new(),
+            rounds: Vec::new(),
+            shown_t: None,
         }
     }
 
@@ -463,24 +468,31 @@ impl Brackets {
         self.viewer.to_string()
     }
 
-    /// Replaces the elements `ids` with `new`.
-    fn replace(out: &mut Outbox, ids: &mut Vec<String>, new: Vec<Element>) {
-        for id in ids.drain(..) {
-            out.remove(id);
+    // New elements land at the end of their parent, which is where they
+    // belong, and later ones in a list keep their order, so sending only the
+    // ones that changed is enough whatever shifts the id numbering.
+    fn replace(out: &mut Outbox, shown: &mut Vec<Element>, new: Vec<Element>) {
+        for e in &new {
+            if !shown.contains(e) {
+                out.element(e.clone());
+            }
         }
-        for e in new {
-            ids.push(e.id.clone());
-            out.element(e);
+        for e in shown.iter() {
+            if !new.iter().any(|n| n.id == e.id) {
+                out.remove(e.id.as_str());
+            }
         }
+        *shown = new;
     }
 
     /// Switches to `view`, dropping what belonged to the one before.
     fn show(&mut self, out: &mut Outbox, view: View) {
-        Self::replace(out, &mut self.seed_ids, Vec::new());
-        Self::replace(out, &mut self.round_ids, Vec::new());
+        Self::replace(out, &mut self.seed, Vec::new());
+        Self::replace(out, &mut self.rounds, Vec::new());
         self.open = None;
         self.can_edit = false;
         self.shown.clear();
+        self.shown_t = None;
         self.view = view;
         out.signal(json!({"view": view.name(), "feedback": {"kind": "info", "text": ""}}));
     }
@@ -517,7 +529,7 @@ impl Brackets {
             })
             .collect();
         out.signal(json!({"has_mine": !mine.is_empty()}));
-        Self::replace(out, &mut self.mine_ids, buttons);
+        Self::replace(out, &mut self.mine, buttons);
     }
 
     fn missing(&mut self, out: &mut Outbox) {
@@ -591,7 +603,7 @@ impl Brackets {
                 );
             }
         }
-        Self::replace(out, &mut self.seed_ids, elements);
+        Self::replace(out, &mut self.seed, elements);
         self.draft = Some(Draft { name, teams });
     }
 
@@ -685,7 +697,7 @@ impl Brackets {
         self.seen = b.version;
         let (played, total) = progress(b);
         let champion = champion(b).map(|t| format!("Champion: {}", b.teams[t as usize]));
-        out.signal(json!({"t": {
+        let t = json!({
             "name": b.name,
             "can_edit": self.can_edit,
             "is_owner": self.can_edit && b.owner == self.me(),
@@ -695,7 +707,11 @@ impl Brackets {
             "played": format!("{played} of {total} matches played"),
             "done": played == total,
             "champion": champion.unwrap_or_default(),
-        }}));
+        });
+        if Some(&t) != self.shown_t.as_ref() {
+            out.signal(json!({ "t": t.clone() }));
+            self.shown_t = Some(t);
+        }
 
         let all: Vec<Option<[u32; 2]>> = b.scores.iter().flatten().copied().collect();
         if self.can_edit {
@@ -769,7 +785,7 @@ impl Brackets {
             }
             first += round.len();
         }
-        Self::replace(out, &mut self.round_ids, elements);
+        Self::replace(out, &mut self.rounds, elements);
     }
 
     /// The inputs for the result of match `g`, between `home` and `away`.

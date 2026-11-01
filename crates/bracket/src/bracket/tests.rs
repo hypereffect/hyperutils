@@ -11,35 +11,44 @@ struct Loopback {
 }
 
 impl Loopback {
-    fn receive(&mut self, line: &str) {
+    fn receive(&mut self, line: &str) -> String {
         match RendererMessage::parse(line.trim_end()) {
             Ok(RendererMessage::Hello { params }) => self.app.hello(&mut self.out, &params),
             Ok(RendererMessage::Action(a)) => self.app.action(&mut self.out, &a),
             Err(e) => panic!("{e:?}"),
         }
-        self.pump();
+        self.pump()
     }
 
-    fn pump(&mut self) {
+    /// Sends what the app wrote and returns it, the way the wire would.
+    fn pump(&mut self) -> String {
         let out = self.out.take();
         self.client.receive(out.as_bytes());
+        out
     }
 
-    fn press(&mut self, id: &str) {
+    /// Presses a button and returns what was sent in answer.
+    fn press(&mut self, id: &str) -> String {
         let line = self
             .client
             .trigger(id, "onPress")
             .unwrap_or_else(|| panic!("{id} cannot be pressed"));
-        self.receive(&line);
+        self.receive(&line)
     }
 
     fn write(&mut self, path: &str, value: Value) {
         self.client.write(path, value);
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self) -> String {
         self.app.tick(&mut self.out, 0.0);
-        self.pump();
+        self.pump()
+    }
+
+    /// Brings the screen up to date and returns what had to be sent.
+    fn refresh(&mut self) -> String {
+        self.app.refresh(&mut self.out);
+        self.pump()
     }
 
     fn view(&self) -> &str {
@@ -114,6 +123,28 @@ fn lcg(seed: u64) -> impl FnMut(usize) -> usize {
             .wrapping_add(1442695040888963407);
         ((x >> 33) % n as u64) as usize
     }
+}
+
+/// The ids of the elements that a batch sends, in order.
+fn sent_ids(batch: &str) -> Vec<&str> {
+    batch
+        .lines()
+        .filter_map(|l| {
+            l.strip_prefix("element {\"id\":\"")
+                .map(|rest| &rest[..rest.find('"').unwrap()])
+        })
+        .collect()
+}
+
+/// The ids of the elements that a batch takes away.
+fn removed_ids(batch: &str) -> Vec<&str> {
+    batch
+        .lines()
+        .filter_map(|l| {
+            l.strip_prefix("remove {\"id\":\"")
+                .map(|rest| &rest[..rest.find('"').unwrap()])
+        })
+        .collect()
 }
 
 #[test]
@@ -376,7 +407,14 @@ fn a_bracket_is_placed_drawn_and_played() {
     bob.write("score.g0.a", json!(3));
     bob.press("g0_save");
     assert_eq!(bob.feedback(), json!("Result saved."));
+    // The inputs show the saved result, so it can be corrected in place.
+    assert_eq!(bob.client.value("score.g0.h"), Some(&json!(2)));
+    assert_eq!(bob.client.value("score.g0.a"), Some(&json!(3)));
     assert_eq!(bob.text("t_played"), "1 of 4 matches played");
+    // The owner's inputs follow the saved result too.
+    ann.tick();
+    assert_eq!(ann.client.value("score.g0.h"), Some(&json!(2)));
+    assert_eq!(ann.client.value("score.g0.a"), Some(&json!(3)));
     cy.tick();
     assert_eq!(cy.text("g0"), "1. Lions  2 – 3  Foxes");
     assert!(cy.text("g4").starts_with("5. Foxes  vs  "));
@@ -416,6 +454,71 @@ fn a_bracket_is_placed_drawn_and_played() {
     cy.tick();
     assert_eq!(cy.view(), "missing");
     for l in [&mut ann, &mut bob, &mut cy] {
+        l.clean();
+    }
+}
+
+#[test]
+fn bringing_the_bracket_up_to_date_sends_only_what_changed() {
+    let db = db();
+    let mut bob = connect(&db, person(), "/");
+    bob.write("draft.name", json!("Cup"));
+    bob.write("draft.teams", json!("A\nB\nC\nD"));
+    bob.press("next_btn");
+    // Pinned, so that who plays whom is known.
+    bob.write("seed.s0", json!(0));
+    bob.write("seed.s1", json!(1));
+    bob.write("seed.s2", json!(2));
+    bob.write("seed.s3", json!(3));
+    bob.press("create_btn");
+    assert_eq!(bob.view(), "board");
+
+    // The first result: the button that saved it and the final, whose
+    // first side stops waiting.
+    bob.write("score.g0.h", json!(1));
+    bob.write("score.g0.a", json!(0));
+    let put = bob.press("g0_save");
+    assert_eq!(bob.feedback(), json!("Result saved."));
+    assert_eq!(sent_ids(&put), ["g0_save", "g0_done", "g2"]);
+    assert!(removed_ids(&put).is_empty());
+
+    // The second one: only its button and badge, and the final, which now
+    // has both teams and becomes inputs.
+    bob.write("score.g1.h", json!(2));
+    bob.write("score.g1.a", json!(1));
+    let put = bob.press("g1_save");
+    assert_eq!(
+        sent_ids(&put),
+        [
+            "g1_save",
+            "g1_done",
+            "g2",
+            "g2_n",
+            "g2_home",
+            "g2_h",
+            "g2_dash",
+            "g2_a",
+            "g2_away",
+            "g2_save"
+        ]
+    );
+
+    // Brought up to date again, nothing has to go over the wire.
+    assert_eq!(bob.refresh(), "");
+
+    // A follower of the view link gets one whole copy, then silence.
+    let view = id_of(&bob.text("view_link"));
+    let mut cy = connect(&db, person(), &format!("/{view}"));
+    assert_eq!(cy.text("g0"), "1. A  1 – 0  B");
+    assert_eq!(cy.refresh(), "");
+
+    // Correcting the first result re-sends its line of text, again only
+    // that.
+    bob.write("score.g0.h", json!(2));
+    bob.press("g0_save");
+    let put = cy.tick();
+    assert_eq!(sent_ids(&put), ["g0"]);
+    for l in [&mut bob, &mut cy] {
         l.clean();
     }
 }

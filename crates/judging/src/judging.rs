@@ -346,14 +346,16 @@ fn read_scale(action: &Action, at: &str) -> Result<Scale, String> {
     }
 }
 
+/// The scale signal: numbers, as number inputs bind them.
 fn scale_signal(s: Scale) -> Value {
-    json!({"min": s.min.to_string(), "max": s.max.to_string()})
+    json!({"min": s.min, "max": s.max})
 }
 
+/// A judge's score signal: a number, or nothing for an entry left blank.
 fn score_signal(score: Option<u32>) -> Value {
     match score {
-        Some(s) => s.to_string().into(),
-        None => "".into(),
+        Some(s) => json!(s),
+        None => Value::Null,
     }
 }
 
@@ -416,11 +418,13 @@ pub struct Contests {
     shown: Option<Vec<Option<u32>>>,
     /// Whether the signals that show and hide the scores are set up.
     toggles: bool,
-    /// Ids of the elements that are replaced as a whole.
-    mine_ids: Vec<String>,
-    board_ids: Vec<String>,
-    sheet_ids: Vec<String>,
-    judge_ids: Vec<String>,
+    /// The elements sent last, so that a refresh re-sends only what changed.
+    mine: Vec<Element>,
+    board: Vec<Element>,
+    sheet: Vec<Element>,
+    judges: Vec<Element>,
+    /// The `c` signal last shown, so that an unchanged contest stays silent.
+    shown_c: Option<Value>,
 }
 
 impl Contests {
@@ -436,10 +440,11 @@ impl Contests {
             seen: 0,
             shown: None,
             toggles: false,
-            mine_ids: Vec::new(),
-            board_ids: Vec::new(),
-            sheet_ids: Vec::new(),
-            judge_ids: Vec::new(),
+            mine: Vec::new(),
+            board: Vec::new(),
+            sheet: Vec::new(),
+            judges: Vec::new(),
+            shown_c: None,
         }
     }
 
@@ -451,25 +456,32 @@ impl Contests {
         format!("{}/{id}", self.origin)
     }
 
-    /// Replaces the elements `ids` with `new`.
-    fn replace(out: &mut Outbox, ids: &mut Vec<String>, new: Vec<Element>) {
-        for id in ids.drain(..) {
-            out.remove(id);
+    // New elements land at the end of their parent, which is where they
+    // belong, and later ones in a list keep their order, so sending only the
+    // ones that changed is enough whatever shifts the id numbering.
+    fn replace(out: &mut Outbox, shown: &mut Vec<Element>, new: Vec<Element>) {
+        for e in &new {
+            if !shown.contains(e) {
+                out.element(e.clone());
+            }
         }
-        for e in new {
-            ids.push(e.id.clone());
-            out.element(e);
+        for e in shown.iter() {
+            if !new.iter().any(|n| n.id == e.id) {
+                out.remove(e.id.as_str());
+            }
         }
+        *shown = new;
     }
 
     /// Switches to `view`, dropping what belonged to the one before.
     fn show(&mut self, out: &mut Outbox, view: View) {
-        Self::replace(out, &mut self.board_ids, Vec::new());
-        Self::replace(out, &mut self.sheet_ids, Vec::new());
-        Self::replace(out, &mut self.judge_ids, Vec::new());
+        Self::replace(out, &mut self.board, Vec::new());
+        Self::replace(out, &mut self.sheet, Vec::new());
+        Self::replace(out, &mut self.judges, Vec::new());
         self.open = None;
         self.role = Role::Viewer;
         self.shown = None;
+        self.shown_c = None;
         self.toggles = false;
         self.view = view;
         out.signal(json!({"view": view.name(), "feedback": {"kind": "info", "text": ""}}));
@@ -508,7 +520,7 @@ impl Contests {
             })
             .collect();
         out.signal(json!({"has_mine": !mine.is_empty()}));
-        Self::replace(out, &mut self.mine_ids, buttons);
+        Self::replace(out, &mut self.mine, buttons);
     }
 
     fn missing(&mut self, out: &mut Outbox) {
@@ -641,7 +653,7 @@ impl Contests {
             Role::Judge(j) => c.judges.get(j),
             _ => None,
         };
-        out.signal(json!({"c": {
+        let shown_c = json!({"c": {
             "name": c.name,
             "role": self.role.name(),
             "judge": judge.map(|j| j.name.as_str()).unwrap_or(""),
@@ -655,14 +667,18 @@ impl Contests {
                 given(&j.scores),
                 c.entries.len()
             )).unwrap_or_default(),
-        }}));
+        }});
+        if Some(&shown_c) != self.shown_c.as_ref() {
+            out.signal(shown_c.clone());
+            self.shown_c = Some(shown_c);
+        }
 
         if let Some(j) = judge {
             // Only what changed is reset, so that nothing being typed is lost.
             let shown = self
                 .shown
                 .get_or_insert_with(|| vec![None; c.entries.len()]);
-            let fresh = self.sheet_ids.is_empty();
+            let fresh = self.sheet.is_empty();
             let mut scores = hypereffect::Map::new();
             for (k, &s) in j.scores.iter().enumerate() {
                 if fresh || shown.get(k) != Some(&s) {
@@ -686,7 +702,7 @@ impl Contests {
                             .bind(format!("score.e{k}"))
                     })
                     .collect();
-                Self::replace(out, &mut self.sheet_ids, sheet);
+                Self::replace(out, &mut self.sheet, sheet);
             }
         }
 
@@ -720,7 +736,7 @@ impl Contests {
                         .text(self.link(&j.link)),
                 );
             }
-            Self::replace(out, &mut self.judge_ids, elements);
+            Self::replace(out, &mut self.judges, elements);
         }
 
         if c.revealed || self.role == Role::Organizer {
@@ -734,9 +750,9 @@ impl Contests {
                 out.signal(json!({ "_open": closed }));
                 self.toggles = true;
             }
-            Self::replace(out, &mut self.board_ids, board_items(c));
+            Self::replace(out, &mut self.board, board_items(c));
         } else {
-            Self::replace(out, &mut self.board_ids, Vec::new());
+            Self::replace(out, &mut self.board, Vec::new());
         }
     }
 

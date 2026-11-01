@@ -11,26 +11,29 @@ struct Loopback {
 }
 
 impl Loopback {
-    fn receive(&mut self, line: &str) {
+    fn receive(&mut self, line: &str) -> String {
         match RendererMessage::parse(line.trim_end()) {
             Ok(RendererMessage::Hello { params }) => self.app.hello(&mut self.out, &params),
             Ok(RendererMessage::Action(a)) => self.app.action(&mut self.out, &a),
             Err(e) => panic!("{e:?}"),
         }
-        self.pump();
+        self.pump()
     }
 
-    fn pump(&mut self) {
+    /// Sends what the app wrote and returns it, the way the wire would.
+    fn pump(&mut self) -> String {
         let out = self.out.take();
         self.client.receive(out.as_bytes());
+        out
     }
 
-    fn press(&mut self, id: &str) {
+    /// Presses a button and returns what was sent in answer.
+    fn press(&mut self, id: &str) -> String {
         let line = self
             .client
             .trigger(id, "onPress")
             .unwrap_or_else(|| panic!("{id} cannot be pressed"));
-        self.receive(&line);
+        self.receive(&line)
     }
 
     /// Sends the action `name`, whether or not a button for it is shown.
@@ -47,9 +50,15 @@ impl Loopback {
         self.client.write(path, value);
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self) -> String {
         self.app.tick(&mut self.out, 0.0);
-        self.pump();
+        self.pump()
+    }
+
+    /// Brings the screen up to date and returns what had to be sent.
+    fn refresh(&mut self) -> String {
+        self.app.refresh(&mut self.out);
+        self.pump()
     }
 
     fn view(&self) -> &str {
@@ -120,6 +129,28 @@ fn person() -> PublicKey {
     Identity::generate().public()
 }
 
+/// The ids of the elements that a batch sends, in order.
+fn sent_ids(batch: &str) -> Vec<&str> {
+    batch
+        .lines()
+        .filter_map(|l| {
+            l.strip_prefix("element {\"id\":\"")
+                .map(|rest| &rest[..rest.find('"').unwrap()])
+        })
+        .collect()
+}
+
+/// The ids of the elements that a batch takes away.
+fn removed_ids(batch: &str) -> Vec<&str> {
+    batch
+        .lines()
+        .filter_map(|l| {
+            l.strip_prefix("remove {\"id\":\"")
+                .map(|rest| &rest[..rest.find('"').unwrap()])
+        })
+        .collect()
+}
+
 fn connect(db: &Arc<Db>, key: PublicKey, path: &str) -> Loopback {
     let mut l = Loopback {
         client: Client::new(),
@@ -145,6 +176,39 @@ fn open(db: &Arc<Db>) -> (Loopback, String) {
         .unwrap()
         .to_owned();
     (m, path)
+}
+
+#[test]
+fn bringing_the_room_up_to_date_sends_only_what_changed() {
+    let db = db();
+    let (mut m, path) = open(&db);
+    let mut ann = connect(&db, person(), &path);
+    ann.join("Ann");
+
+    // The manager's screen: one new row, then nothing.
+    let put = m.tick();
+    let row = m.client.children(Some("players"))[0].clone();
+    let want: Vec<String> = vec![
+        row.clone(),
+        format!("{row}_name"),
+        format!("{row}_right"),
+        format!("{row}_vote"),
+        format!("{row}_remove"),
+    ];
+    let want: Vec<&str> = want.iter().map(String::as_str).collect();
+    assert_eq!(sent_ids(&put), want, "{put}");
+    assert!(removed_ids(&put).is_empty());
+    assert_eq!(m.refresh(), "");
+
+    // Starting the round: only Ann's badge, which goes from in to thinking…
+    let badge = format!("{row}_vote");
+    let put = m.press("start_btn");
+    assert_eq!(sent_ids(&put), [badge.as_str()], "{put}");
+    assert_eq!(m.tick(), "");
+    assert_eq!(m.refresh(), "");
+    for l in [&mut m, &mut ann] {
+        assert!(l.client.take_diagnostics().is_empty());
+    }
 }
 
 #[test]

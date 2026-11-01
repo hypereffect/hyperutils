@@ -11,18 +11,20 @@ struct Loopback {
 }
 
 impl Loopback {
-    fn receive(&mut self, line: &str) {
+    fn receive(&mut self, line: &str) -> String {
         match RendererMessage::parse(line.trim_end()) {
             Ok(RendererMessage::Hello { params }) => self.app.hello(&mut self.out, &params),
             Ok(RendererMessage::Action(a)) => self.app.action(&mut self.out, &a),
             Err(e) => panic!("{e:?}"),
         }
-        self.pump();
+        self.pump()
     }
 
-    fn pump(&mut self) {
+    /// Sends what the app wrote and returns it, the way the wire would.
+    fn pump(&mut self) -> String {
         let out = self.out.take();
         self.client.receive(out.as_bytes());
+        out
     }
 
     /// Triggers a handler, if the client lets it, and delivers the response.
@@ -34,17 +36,34 @@ impl Loopback {
         true
     }
 
-    fn press(&mut self, id: &str) {
-        assert!(self.trigger(id, "onPress"), "{id} cannot be pressed");
+    /// Presses a button and returns what was sent in answer.
+    fn press(&mut self, id: &str) -> String {
+        let line = self
+            .client
+            .trigger(id, "onPress")
+            .unwrap_or_else(|| panic!("{id} cannot be pressed"));
+        self.receive(&line)
     }
 
     fn write(&mut self, path: &str, value: Value) {
         self.client.write(path, value);
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self) -> String {
         self.app.tick(&mut self.out, 0.0);
-        self.pump();
+        self.pump()
+    }
+
+    /// Brings the fill screen up to date and returns what had to be sent.
+    fn refresh_fill(&mut self) -> String {
+        self.app.refresh_fill(&mut self.out);
+        self.pump()
+    }
+
+    /// Brings the results screen up to date and returns what had to be sent.
+    fn refresh_results(&mut self) -> String {
+        self.app.refresh_results(&mut self.out);
+        self.pump()
     }
 
     fn view(&self) -> &str {
@@ -142,6 +161,28 @@ fn create(db: &Arc<Db>, key: PublicKey) -> (Loopback, String) {
     (ann, id)
 }
 
+/// The ids of the elements that a batch sends, in order.
+fn sent_ids(batch: &str) -> Vec<&str> {
+    batch
+        .lines()
+        .filter_map(|l| {
+            l.strip_prefix("element {\"id\":\"")
+                .map(|rest| &rest[..rest.find('"').unwrap()])
+        })
+        .collect()
+}
+
+/// The ids of the elements that a batch takes away.
+fn removed_ids(batch: &str) -> Vec<&str> {
+    batch
+        .lines()
+        .filter_map(|l| {
+            l.strip_prefix("remove {\"id\":\"")
+                .map(|rest| &rest[..rest.find('"').unwrap()])
+        })
+        .collect()
+}
+
 #[test]
 fn routes() {
     assert_eq!(Route::parse("/"), Route::Home);
@@ -151,6 +192,45 @@ fn routes() {
     assert_eq!(Route::parse("/abc/results"), Route::Results("abc".into()));
     assert_eq!(Route::parse("/abc/edit"), Route::Edit("abc".into()));
     assert_eq!(Route::parse("/abc/what"), Route::Unknown);
+}
+
+#[test]
+fn bringing_the_form_up_to_date_sends_only_what_changed() {
+    let db = db();
+    let ann_key = person();
+    let (mut ann, id) = create(&db, ann_key);
+    assert_eq!(ann.view(), "fill");
+    // Just drawn, and brought up to date again: nothing to send.
+    assert_eq!(ann.refresh_fill(), "");
+
+    // Answering and submitting: only signals; the questions do not move.
+    ann.write("answer.f0", json!("Ann"));
+    ann.write("answer.f1", json!("Lake"));
+    let put = ann.press("submit_btn");
+    assert!(sent_ids(&put).is_empty(), "{put}");
+    assert!(removed_ids(&put).is_empty());
+    assert_eq!(ann.refresh_fill(), "");
+
+    // The results screen up to date, and again: nothing.
+    ann.press("results_btn");
+    assert_eq!(ann.view(), "results");
+    assert_eq!(ann.refresh_results(), "");
+
+    // An answer comes in: its count, its line, and the changed share; the
+    // totals of the untouched questions stay as they are.
+    let mut bob = connect(&db, person(), &format!("/{id}"));
+    bob.write("answer.f0", json!("Bob"));
+    bob.press("submit_btn");
+    let put = ann.tick();
+    assert_eq!(
+        sent_ids(&put),
+        ["r0_count", "r0_1", "r1_count", "r1_o0", "r2_count"],
+        "{put}"
+    );
+    assert!(removed_ids(&put).is_empty());
+    assert_eq!(ann.refresh_results(), "");
+    ann.clean();
+    bob.clean();
 }
 
 #[test]

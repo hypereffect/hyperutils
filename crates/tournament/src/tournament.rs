@@ -331,13 +331,15 @@ fn read_points(action: &Action, at: &str) -> Result<Points, String> {
 }
 
 fn points_signal(p: Points) -> Value {
-    json!({"win": p.win.to_string(), "draw": p.draw.to_string(), "loss": p.loss.to_string()})
+    json!({"win": p.win, "draw": p.draw, "loss": p.loss})
 }
 
+/// The score signal: numbers, as number inputs bind them, or nothing when
+/// the game has no result.
 fn score_signal(score: Option<[u32; 2]>) -> Value {
     match score {
-        Some([h, a]) => json!({"h": h.to_string(), "a": a.to_string()}),
-        None => json!({"h": "", "a": ""}),
+        Some([h, a]) => json!({"h": h, "a": a}),
+        None => json!({"h": null, "a": null}),
     }
 }
 
@@ -380,10 +382,12 @@ pub struct Tournaments {
     shown_points: Option<Points>,
     /// Whether the signals that show and hide the records are set up.
     toggles: bool,
-    /// Ids of the elements that are replaced as a whole.
-    mine_ids: Vec<String>,
-    standing_ids: Vec<String>,
-    fixture_ids: Vec<String>,
+    /// The elements sent last, so that a refresh re-sends only what changed.
+    mine: Vec<Element>,
+    standings: Vec<Element>,
+    fixtures: Vec<Element>,
+    /// The `t` signal last shown, so that an unchanged tournament stays silent.
+    shown_t: Option<Value>,
 }
 
 impl Tournaments {
@@ -400,9 +404,10 @@ impl Tournaments {
             shown: Vec::new(),
             shown_points: None,
             toggles: false,
-            mine_ids: Vec::new(),
-            standing_ids: Vec::new(),
-            fixture_ids: Vec::new(),
+            mine: Vec::new(),
+            standings: Vec::new(),
+            fixtures: Vec::new(),
+            shown_t: None,
         }
     }
 
@@ -410,25 +415,32 @@ impl Tournaments {
         self.viewer.to_string()
     }
 
-    /// Replaces the elements `ids` with `new`.
-    fn replace(out: &mut Outbox, ids: &mut Vec<String>, new: Vec<Element>) {
-        for id in ids.drain(..) {
-            out.remove(id);
+    // New elements land at the end of their parent, which is where they
+    // belong, and later ones in a list keep their order, so sending only the
+    // ones that changed is enough whatever shifts the id numbering.
+    fn replace(out: &mut Outbox, shown: &mut Vec<Element>, new: Vec<Element>) {
+        for e in &new {
+            if !shown.contains(e) {
+                out.element(e.clone());
+            }
         }
-        for e in new {
-            ids.push(e.id.clone());
-            out.element(e);
+        for e in shown.iter() {
+            if !new.iter().any(|n| n.id == e.id) {
+                out.remove(e.id.as_str());
+            }
         }
+        *shown = new;
     }
 
     /// Switches to `view`, dropping what belonged to the one before.
     fn show(&mut self, out: &mut Outbox, view: View) {
-        Self::replace(out, &mut self.standing_ids, Vec::new());
-        Self::replace(out, &mut self.fixture_ids, Vec::new());
+        Self::replace(out, &mut self.standings, Vec::new());
+        Self::replace(out, &mut self.fixtures, Vec::new());
         self.open = None;
         self.can_edit = false;
         self.shown.clear();
         self.shown_points = None;
+        self.shown_t = None;
         self.toggles = false;
         self.view = view;
         out.signal(json!({"view": view.name(), "feedback": {"kind": "info", "text": ""}}));
@@ -467,7 +479,7 @@ impl Tournaments {
             })
             .collect();
         out.signal(json!({"has_mine": !mine.is_empty()}));
-        Self::replace(out, &mut self.mine_ids, buttons);
+        Self::replace(out, &mut self.mine, buttons);
     }
 
     fn missing(&mut self, out: &mut Outbox) {
@@ -559,7 +571,7 @@ impl Tournaments {
         self.seen = t.version;
         let played = t.games.iter().filter(|g| g.score.is_some()).count();
         let p = t.points;
-        out.signal(json!({"t": {
+        let head = json!({"t": {
             "name": t.name,
             "can_edit": self.can_edit,
             "is_owner": self.can_edit && t.owner == self.me(),
@@ -568,7 +580,11 @@ impl Tournaments {
             "points": format!("Win {} · Draw {} · Loss {}", p.win, p.draw, p.loss),
             "played": format!("{played} of {} games played", t.games.len()),
             "done": played == t.games.len(),
-        }}));
+        }});
+        if Some(&head) != self.shown_t.as_ref() {
+            out.signal(head.clone());
+            self.shown_t = Some(head);
+        }
 
         if self.can_edit {
             // Only what changed is reset, so that nothing being typed is lost.
@@ -602,7 +618,7 @@ impl Tournaments {
             out.signal(json!({ "_open": closed }));
             self.toggles = true;
         }
-        Self::replace(out, &mut self.standing_ids, standing_items(t));
+        Self::replace(out, &mut self.standings, standing_items(t));
 
         let team = |i: u32| t.teams[i as usize].as_str();
         let mut elements = Vec::new();
@@ -680,7 +696,7 @@ impl Tournaments {
                 );
             }
         }
-        Self::replace(out, &mut self.fixture_ids, elements);
+        Self::replace(out, &mut self.fixtures, elements);
     }
 
     /// Changes the tournament open with an edit link, if `change` says so,

@@ -138,8 +138,13 @@ fn read_capacity(s: &str) -> Result<Option<u32>, String> {
     }
 }
 
-fn capacity_signal(c: Option<u32>) -> String {
-    c.map(|n| n.to_string()).unwrap_or_default()
+/// The capacity signal: a number, as a number input binds it, or nothing
+/// for no limit.
+fn capacity_signal(c: Option<u32>) -> Value {
+    match c {
+        Some(n) => json!(n),
+        None => Value::Null,
+    }
 }
 
 /// A line of the item list: a label, and how many it takes if the line ends
@@ -257,10 +262,12 @@ pub struct Sheets {
     shown_items: BTreeMap<u32, (String, Option<u32>)>,
     /// The title and description in their edit inputs, likewise.
     shown_details: Option<(String, String)>,
-    /// Ids of the elements that are replaced as a whole.
-    mine_ids: Vec<String>,
-    item_ids: Vec<String>,
-    log_ids: Vec<String>,
+    /// The elements sent last, so that a refresh re-sends only what changed.
+    mine: Vec<Element>,
+    items: Vec<Element>,
+    log: Vec<Element>,
+    /// The `sheet` signal last shown, so that an unchanged sheet stays silent.
+    shown_sheet: Option<Value>,
 }
 
 impl Sheets {
@@ -276,9 +283,10 @@ impl Sheets {
             seen: 0,
             shown_items: BTreeMap::new(),
             shown_details: None,
-            mine_ids: Vec::new(),
-            item_ids: Vec::new(),
-            log_ids: Vec::new(),
+            mine: Vec::new(),
+            items: Vec::new(),
+            log: Vec::new(),
+            shown_sheet: None,
         }
     }
 
@@ -286,24 +294,31 @@ impl Sheets {
         self.viewer.to_string()
     }
 
-    /// Replaces the elements `ids` with `new`.
-    fn replace(out: &mut Outbox, ids: &mut Vec<String>, new: Vec<Element>) {
-        for id in ids.drain(..) {
-            out.remove(id);
+    // New elements land at the end of their parent, which is where they
+    // belong, and later ones in a list keep their order, so sending only the
+    // ones that changed is enough whatever shifts the id numbering.
+    fn replace(out: &mut Outbox, shown: &mut Vec<Element>, new: Vec<Element>) {
+        for e in &new {
+            if !shown.contains(e) {
+                out.element(e.clone());
+            }
         }
-        for e in new {
-            ids.push(e.id.clone());
-            out.element(e);
+        for e in shown.iter() {
+            if !new.iter().any(|n| n.id == e.id) {
+                out.remove(e.id.as_str());
+            }
         }
+        *shown = new;
     }
 
     /// Switches to `view`, dropping what belonged to the one before.
     fn show(&mut self, out: &mut Outbox, view: View) {
-        Self::replace(out, &mut self.item_ids, Vec::new());
-        Self::replace(out, &mut self.log_ids, Vec::new());
+        Self::replace(out, &mut self.items, Vec::new());
+        Self::replace(out, &mut self.log, Vec::new());
         self.open = None;
         self.shown_items.clear();
         self.shown_details = None;
+        self.shown_sheet = None;
         self.view = view;
         out.signal(json!({
             "view": view.name(),
@@ -339,7 +354,7 @@ impl Sheets {
             })
             .collect();
         out.signal(json!({"has_mine": !mine.is_empty()}));
-        Self::replace(out, &mut self.mine_ids, buttons);
+        Self::replace(out, &mut self.mine, buttons);
     }
 
     fn missing(&mut self, out: &mut Outbox) {
@@ -435,7 +450,7 @@ impl Sheets {
         let me = self.me();
         let is_owner = s.owner == me;
         let (filled, full) = fill(s);
-        out.signal(json!({"sheet": {
+        let shown = json!({"sheet": {
             "title": s.title,
             "description": s.description,
             "is_owner": is_owner,
@@ -443,7 +458,11 @@ impl Sheets {
             "fill": filled,
             "full": full,
             "me": format!("Your tag is {}. It is shown with every name you put down.", self.tag),
-        }}));
+        }});
+        if Some(&shown) != self.shown_sheet.as_ref() {
+            out.signal(shown.clone());
+            self.shown_sheet = Some(shown);
+        }
 
         if is_owner {
             // Only what changed is reset, so that nothing being typed is lost.
@@ -520,12 +539,6 @@ impl Sheets {
                         .parent(&row)
                         .text(name.name.as_str()),
                 );
-                elements.push(
-                    ui::text(format!("{row}_by"))
-                        .parent(&row)
-                        .variant("caption")
-                        .text(format!("by {}", name.by)),
-                );
                 if name.key == me || is_owner {
                     elements.push(
                         ui::button(format!("{row}_leave"))
@@ -575,7 +588,7 @@ impl Sheets {
                 );
             }
         }
-        Self::replace(out, &mut self.item_ids, elements);
+        Self::replace(out, &mut self.items, elements);
 
         let now = store::now();
         let lines = s
@@ -591,7 +604,7 @@ impl Sheets {
                 ))
             })
             .collect();
-        Self::replace(out, &mut self.log_ids, lines);
+        Self::replace(out, &mut self.log, lines);
     }
 
     /// Changes the open sheet, if `change` says so, and shows how it is now.
@@ -791,7 +804,7 @@ impl Sheets {
             Ok(format!("“{label}” is added."))
         });
         if added {
-            out.signal(json!({"add": {"label": "", "cap": "1"}}));
+            out.signal(json!({"add": {"label": "", "cap": 1}}));
         }
     }
 
@@ -865,7 +878,7 @@ impl App for Sheets {
                       "fill": "", "full": false, "me": ""},
             "who": "",
             "edit": {},
-            "add": {"label": "", "cap": "1"},
+            "add": {"label": "", "cap": 1},
             "details": {"title": "", "description": ""},
             "_editing": false,
         }));

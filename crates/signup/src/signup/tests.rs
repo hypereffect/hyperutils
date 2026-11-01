@@ -11,26 +11,29 @@ struct Loopback {
 }
 
 impl Loopback {
-    fn receive(&mut self, line: &str) {
+    fn receive(&mut self, line: &str) -> String {
         match RendererMessage::parse(line.trim_end()) {
             Ok(RendererMessage::Hello { params }) => self.app.hello(&mut self.out, &params),
             Ok(RendererMessage::Action(a)) => self.app.action(&mut self.out, &a),
             Err(e) => panic!("{e:?}"),
         }
-        self.pump();
+        self.pump()
     }
 
-    fn pump(&mut self) {
+    /// Sends what the app wrote and returns it, the way the wire would.
+    fn pump(&mut self) -> String {
         let out = self.out.take();
         self.client.receive(out.as_bytes());
+        out
     }
 
-    fn press(&mut self, id: &str) {
+    /// Presses a button and returns what was sent in answer.
+    fn press(&mut self, id: &str) -> String {
         let line = self
             .client
             .trigger(id, "onPress")
             .unwrap_or_else(|| panic!("{id} cannot be pressed"));
-        self.receive(&line);
+        self.receive(&line)
     }
 
     fn can_press(&self, id: &str) -> bool {
@@ -48,9 +51,15 @@ impl Loopback {
         self.client.write(path, value);
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self) -> String {
         self.app.tick(&mut self.out, 0.0);
-        self.pump();
+        self.pump()
+    }
+
+    /// Brings the screen up to date and returns what had to be sent.
+    fn refresh(&mut self) -> String {
+        self.app.refresh(&mut self.out);
+        self.pump()
     }
 
     fn view(&self) -> &str {
@@ -110,6 +119,28 @@ fn connect(db: &Arc<Db>, key: PublicKey, path: &str) -> Loopback {
     let hello = l.client.hello();
     l.receive(&hello);
     l
+}
+
+/// The ids of the elements that a batch sends, in order.
+fn sent_ids(batch: &str) -> Vec<&str> {
+    batch
+        .lines()
+        .filter_map(|l| {
+            l.strip_prefix("element {\"id\":\"")
+                .map(|rest| &rest[..rest.find('"').unwrap()])
+        })
+        .collect()
+}
+
+/// The ids of the elements that a batch takes away.
+fn removed_ids(batch: &str) -> Vec<&str> {
+    batch
+        .lines()
+        .filter_map(|l| {
+            l.strip_prefix("remove {\"id\":\"")
+                .map(|rest| &rest[..rest.find('"').unwrap()])
+        })
+        .collect()
 }
 
 /// Ann makes a picnic sheet: drinks for one, dessert for one, drivers for
@@ -238,6 +269,51 @@ fn people_put_names_down_and_everyone_sees_who() {
 }
 
 #[test]
+fn bringing_the_sheet_up_to_date_sends_only_what_changed() {
+    let db = db();
+    let (_, id) = create(&db, person());
+    let mut bob = connect(&db, person(), &format!("/{id}"));
+    let mut cy = connect(&db, person(), &format!("/{id}"));
+    bob.write("who", json!("Bob"));
+
+    let put = bob.press("item0_join");
+    assert_eq!(bob.feedback(), json!("“Bob” is down for “Drinks”."));
+    // The name row; Drinks is full, so its button goes away.
+    let row = bob.client.children(Some("item0_names"))[0].clone();
+    let want: Vec<String> = vec![
+        "item0_count".into(),
+        "item0_full".into(),
+        row.clone(),
+        format!("{row}_name"),
+        format!("{row}_leave"),
+        "log0".into(),
+        "log1".into(),
+    ];
+    let want: Vec<&str> = want.iter().map(String::as_str).collect();
+    assert_eq!(sent_ids(&put), want, "{put}");
+    assert_eq!(removed_ids(&put), ["item0_join"]);
+    // Brought up to date again, nothing has to go over the wire.
+    assert_eq!(bob.refresh(), "");
+
+    // A follower sees the same, minus the button to take a name off; the
+    // history moves down a line and keeps its old line under the new id.
+    let put = cy.tick();
+    let want: Vec<String> = vec![
+        "item0_count".into(),
+        "item0_full".into(),
+        row.clone(),
+        format!("{row}_name"),
+        "log0".into(),
+        "log1".into(),
+    ];
+    let want: Vec<&str> = want.iter().map(String::as_str).collect();
+    assert_eq!(sent_ids(&put), want, "{put}");
+    assert_eq!(removed_ids(&put), ["item0_join"]);
+    bob.clean();
+    cy.clean();
+}
+
+#[test]
 fn a_full_item_takes_no_more() {
     let db = db();
     let (_, id) = create(&db, person());
@@ -302,7 +378,7 @@ fn the_owner_edits_the_items() {
     ann.toggle("edit_btn");
     assert!(ann.visible("add_card"));
     assert!(ann.visible("item0_edit"));
-    assert_eq!(ann.client.value("edit.i2.cap"), Some(&json!("3")));
+    assert_eq!(ann.client.value("edit.i2.cap"), Some(&json!(3)));
 
     // Adding.
     ann.write("add.label", json!("drinks"));
@@ -313,6 +389,8 @@ fn the_owner_edits_the_items() {
     ann.press("add_btn");
     assert_eq!(ann.feedback(), json!("“Napkins” is added."));
     assert_eq!(ann.client.value("add.label"), Some(&json!("")));
+    assert_eq!(ann.client.value("add.cap"), Some(&json!(1)));
+    assert_eq!(ann.client.value("edit.i3.cap"), None);
     assert_eq!(ann.text("item3_count"), "0, no limit");
     assert_eq!(ann.text("sheet_fill"), "0 names down");
 
@@ -342,6 +420,9 @@ fn the_owner_edits_the_items() {
     ann.press("item2_edit_save");
     assert_eq!(ann.feedback(), json!("“Cars” is saved."));
     assert_eq!(ann.client.attr("item2", "title"), Some(json!("Cars")));
+    // The inputs show what the server saved, so it can be changed again.
+    assert_eq!(ann.client.value("edit.i2.label"), Some(&json!("Cars")));
+    assert_eq!(ann.client.value("edit.i2.cap"), Some(&json!(2)));
     assert_eq!(ann.text("item2_full"), "Taken");
     ann.press("item2_edit_save");
     assert_eq!(ann.feedback(), json!("Nothing to save."));

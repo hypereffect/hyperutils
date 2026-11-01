@@ -139,11 +139,13 @@ pub struct Meet {
     seen: u64,
     /// How many options the open meeting has.
     options: usize,
-    /// Ids of the elements that belong to the open meeting or to the list of
-    /// meetings, which are replaced as a whole.
-    meeting_ids: Vec<String>,
-    answer_ids: Vec<String>,
-    mine_ids: Vec<String>,
+    /// The elements sent last, so that a refresh re-sends only what changed.
+    mine: Vec<Element>,
+    meeting: Vec<Element>,
+    rows: Vec<Element>,
+    /// The `meeting` and `results` signals last shown, so that an unchanged
+    /// meeting stays silent.
+    shown_meeting: Option<Value>,
 }
 
 impl Meet {
@@ -154,21 +156,28 @@ impl Meet {
             code: None,
             seen: 0,
             options: 0,
-            meeting_ids: Vec::new(),
-            answer_ids: Vec::new(),
-            mine_ids: Vec::new(),
+            mine: Vec::new(),
+            meeting: Vec::new(),
+            rows: Vec::new(),
+            shown_meeting: None,
         }
     }
 
-    /// Replaces the elements `ids` with `new`.
-    fn replace(out: &mut Outbox, ids: &mut Vec<String>, new: Vec<Element>) {
-        for id in ids.drain(..) {
-            out.remove(id);
+    // New elements land at the end of their parent, which is where they
+    // belong, and later ones in a list keep their order, so sending only the
+    // ones that changed is enough whatever shifts the id numbering.
+    fn replace(out: &mut Outbox, shown: &mut Vec<Element>, new: Vec<Element>) {
+        for e in &new {
+            if !shown.contains(e) {
+                out.element(e.clone());
+            }
         }
-        for e in new {
-            ids.push(e.id.clone());
-            out.element(e);
+        for e in shown.iter() {
+            if !new.iter().any(|n| n.id == e.id) {
+                out.remove(e.id.as_str());
+            }
         }
+        *shown = new;
     }
 
     /// The meetings this key knows about, as buttons.
@@ -194,7 +203,7 @@ impl Meet {
             })
             .collect();
         out.signal(json!({"has_mine": !meetings.is_empty()}));
-        Self::replace(out, &mut self.mine_ids, buttons);
+        Self::replace(out, &mut self.mine, buttons);
     }
 
     /// Opens a meeting in this session.
@@ -229,6 +238,7 @@ impl Meet {
         out.signal(
             json!({"view": "meeting", "answer": answer, "feedback": {"kind": "info", "text": ""}}),
         );
+
         let mut elements = Vec::new();
         for (k, label) in m.options.iter().enumerate() {
             elements.push(
@@ -246,7 +256,7 @@ impl Meet {
                     .text(cel(format!("s.results.o{k}"))),
             );
         }
-        Self::replace(out, &mut self.meeting_ids, elements);
+        Self::replace(out, &mut self.meeting, elements);
         remember(&self.db, &key, &code, None);
         self.show_mine(out, key);
         self.refresh(out, key);
@@ -255,8 +265,9 @@ impl Meet {
     /// Back to the start page.
     fn close_view(&mut self, out: &mut Outbox) {
         self.code = None;
-        Self::replace(out, &mut self.meeting_ids, Vec::new());
-        Self::replace(out, &mut self.answer_ids, Vec::new());
+        Self::replace(out, &mut self.meeting, Vec::new());
+        Self::replace(out, &mut self.rows, Vec::new());
+        self.shown_meeting = None;
     }
 
     fn go_home(&mut self, out: &mut Outbox, key: PublicKey) {
@@ -324,7 +335,7 @@ impl Meet {
             )
         };
         results.insert("best".into(), best.into());
-        out.signal(json!({
+        let shown_meeting = json!({
             "meeting": {
                 "name": m.name,
                 "description": m.description,
@@ -335,7 +346,11 @@ impl Meet {
                 "count": format!("{} answered", answers.len()),
             },
             "results": results,
-        }));
+        });
+        if Some(&shown_meeting) != self.shown_meeting.as_ref() {
+            out.signal(shown_meeting.clone());
+            self.shown_meeting = Some(shown_meeting);
+        }
         let rows = answers
             .iter()
             .enumerate()
@@ -362,7 +377,7 @@ impl Meet {
                 ui::text(format!("ans_{n}")).parent("people").text(line)
             })
             .collect();
-        Self::replace(out, &mut self.answer_ids, rows);
+        Self::replace(out, &mut self.rows, rows);
     }
 
     fn create(&mut self, out: &mut Outbox, key: PublicKey, action: &Action) {
@@ -821,18 +836,26 @@ mod tests {
     }
 
     impl Loopback {
-        fn receive(&mut self, line: &str) {
+        fn receive(&mut self, line: &str) -> String {
             match RendererMessage::parse(line.trim_end()) {
                 Ok(RendererMessage::Hello { params }) => self.app.hello(&mut self.out, &params),
                 Ok(RendererMessage::Action(a)) => self.app.action(&mut self.out, &a),
                 Err(e) => panic!("{e:?}"),
             }
-            self.pump();
+            self.pump()
         }
 
-        fn pump(&mut self) {
+        /// Sends what the app wrote and returns it, the way the wire would.
+        fn pump(&mut self) -> String {
             let out = self.out.take();
             self.client.receive(out.as_bytes());
+            out
+        }
+
+        /// Brings the meeting up to date and returns what had to be sent.
+        fn pull(&mut self, key: PublicKey) -> String {
+            self.app.refresh(&mut self.out, key);
+            self.pump()
         }
 
         /// Triggers a handler, if the client lets it, and delivers the
@@ -849,10 +872,32 @@ mod tests {
             self.client.write(path, value);
         }
 
-        fn tick(&mut self, now_ms: f64) {
+        fn tick(&mut self, now_ms: f64) -> String {
             self.app.tick(&mut self.out, now_ms);
-            self.pump();
+            self.pump()
         }
+    }
+
+    /// The ids of the elements that a batch sends, in order.
+    fn sent_ids(batch: &str) -> Vec<&str> {
+        batch
+            .lines()
+            .filter_map(|l| {
+                l.strip_prefix("element {\"id\":\"")
+                    .map(|rest| &rest[..rest.find('"').unwrap()])
+            })
+            .collect()
+    }
+
+    /// The ids of the elements that a batch takes away.
+    fn removed_ids(batch: &str) -> Vec<&str> {
+        batch
+            .lines()
+            .filter_map(|l| {
+                l.strip_prefix("remove {\"id\":\"")
+                    .map(|rest| &rest[..rest.find('"').unwrap()])
+            })
+            .collect()
     }
 
     fn db() -> Arc<Db> {
@@ -899,6 +944,32 @@ mod tests {
             .unwrap()
             .to_owned();
         (l, code)
+    }
+
+    #[test]
+    fn bringing_the_meeting_up_to_date_sends_only_what_changed() {
+        let db = db();
+        let (ann_key, bob_key) = (person(), person());
+        let (mut ann, code) = create(&db, ann_key);
+        // Just drawn, and brought up to date again: nothing to send.
+        assert_eq!(ann.pull(ann_key), "");
+
+        // An answer comes in: its option lines and its row, not the rest.
+        let mut bob = connect(&db, bob_key);
+        bob.write("form.code", json!(code.clone()));
+        assert!(bob.trigger("join_btn", "onPress"));
+        bob.write("answer.name", json!("Bob"));
+        bob.write("answer.o1", json!(true));
+        assert!(bob.trigger("save", "onPress"));
+        let put = ann.pull(ann_key);
+        // The option lines re-render from the results signal; only the new
+        // row is an element to send.
+        assert_eq!(sent_ids(&put), ["ans_0"], "{put}");
+        assert!(removed_ids(&put).is_empty());
+        assert_eq!(ann.pull(ann_key), "");
+        for l in [&mut ann, &mut bob] {
+            assert!(l.client.take_diagnostics().is_empty());
+        }
     }
 
     #[test]

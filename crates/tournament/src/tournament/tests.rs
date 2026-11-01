@@ -12,26 +12,29 @@ struct Loopback {
 }
 
 impl Loopback {
-    fn receive(&mut self, line: &str) {
+    fn receive(&mut self, line: &str) -> String {
         match RendererMessage::parse(line.trim_end()) {
             Ok(RendererMessage::Hello { params }) => self.app.hello(&mut self.out, &params),
             Ok(RendererMessage::Action(a)) => self.app.action(&mut self.out, &a),
             Err(e) => panic!("{e:?}"),
         }
-        self.pump();
+        self.pump()
     }
 
-    fn pump(&mut self) {
+    /// Sends what the app wrote and returns it, the way the wire would.
+    fn pump(&mut self) -> String {
         let out = self.out.take();
         self.client.receive(out.as_bytes());
+        out
     }
 
-    fn press(&mut self, id: &str) {
+    /// Presses a button and returns what was sent in answer.
+    fn press(&mut self, id: &str) -> String {
         let line = self
             .client
             .trigger(id, "onPress")
             .unwrap_or_else(|| panic!("{id} cannot be pressed"));
-        self.receive(&line);
+        self.receive(&line)
     }
 
     /// Presses a button that only changes the renderer's own signals.
@@ -43,9 +46,15 @@ impl Loopback {
         self.client.write(path, value);
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self) -> String {
         self.app.tick(&mut self.out, 0.0);
-        self.pump();
+        self.pump()
+    }
+
+    /// Brings the screen up to date and returns what had to be sent.
+    fn refresh(&mut self) -> String {
+        self.app.refresh(&mut self.out);
+        self.pump()
     }
 
     fn view(&self) -> &str {
@@ -109,6 +118,28 @@ fn id_of(link: &str) -> String {
     link.strip_prefix(&format!("{ORIGIN}/"))
         .expect("the link is on the origin")
         .to_owned()
+}
+
+/// The ids of the elements that a batch sends, in order.
+fn sent_ids(batch: &str) -> Vec<&str> {
+    batch
+        .lines()
+        .filter_map(|l| {
+            l.strip_prefix("element {\"id\":\"")
+                .map(|rest| &rest[..rest.find('"').unwrap()])
+        })
+        .collect()
+}
+
+/// The ids of the elements that a batch takes away.
+fn removed_ids(batch: &str) -> Vec<&str> {
+    batch
+        .lines()
+        .filter_map(|l| {
+            l.strip_prefix("remove {\"id\":\"")
+                .map(|rest| &rest[..rest.find('"').unwrap()])
+        })
+        .collect()
 }
 
 /// Ann makes a league of four, and gets the edit and view ids.
@@ -335,6 +366,9 @@ fn results_entered_on_one_link_show_on_the_other() {
     assert_eq!(bob.feedback(), json!("Result saved."));
     assert_eq!(bob.text("t_played"), "1 of 6 games played");
     assert_eq!(bob.client.attr("g0_save", "label"), Some(json!("Update")));
+    // The inputs show the saved result, so it can be corrected in place.
+    assert_eq!(bob.client.value("score.g0.h"), Some(&json!(2)));
+    assert_eq!(bob.client.value("score.g0.a"), Some(&json!(1)));
     // What he is typing in another game is kept.
     assert_eq!(bob.client.value("score.g1.h"), Some(&json!("1")));
     bob.write("score.g1.a", json!("x"));
@@ -365,7 +399,7 @@ fn results_entered_on_one_link_show_on_the_other() {
 
     // Ann corrects it to a draw and makes a draw worth two.
     ann.tick();
-    assert_eq!(ann.client.value("score.g0.h"), Some(&json!("2")));
+    assert_eq!(ann.client.value("score.g0.h"), Some(&json!(2)));
     ann.write("score.g0.h", json!("1"));
     ann.press("g0_save");
     ann.write("points.draw", json!("2"));
@@ -397,14 +431,17 @@ fn results_entered_on_one_link_show_on_the_other() {
     assert!(cy.label("s3_team").starts_with("3. "));
     // Bob's inputs follow, since he was not changing that game.
     bob.tick();
-    assert_eq!(bob.client.value("score.g0.h"), Some(&json!("1")));
-    assert_eq!(bob.client.value("points.draw"), Some(&json!("2")));
+    assert_eq!(bob.client.value("score.g0.h"), Some(&json!(1)));
+    assert_eq!(bob.client.value("score.g0.a"), Some(&json!(1)));
+    assert_eq!(bob.client.value("points.draw"), Some(&json!(2)));
 
     // Clearing both undoes the result.
     bob.write("score.g0.h", json!(""));
     bob.write("score.g0.a", json!(""));
     bob.press("g0_save");
     assert_eq!(bob.feedback(), json!("Result cleared."));
+    assert_eq!(bob.client.value("score.g0.h"), None);
+    assert_eq!(bob.client.value("score.g0.a"), None);
     assert_eq!(bob.text("t_played"), "0 of 6 games played");
     for l in [&mut ann, &mut bob, &mut cy] {
         l.clean();
@@ -470,6 +507,61 @@ fn the_creator_finds_and_deletes_it() {
     for l in [&mut ann, &mut cy, &mut ann_viewing] {
         l.clean();
     }
+}
+
+/// The standings as the elements a save has to re-send: the rows whose
+/// order, points or records changed, in the order they are sent, plus the
+/// parts of the game that was played.
+fn changed_standings(before: &Tournament, after: &Tournament, game: usize) -> Vec<String> {
+    let (a, b) = (standings(before), standings(after));
+    let mut want = Vec::new();
+    for k in 0..b.len() {
+        let (x, y) = (&a[k], &b[k]);
+        if (x.position, x.team) != (y.position, y.team) {
+            want.push(format!("s{k}_team"));
+        }
+        if x.points != y.points || (x.played > 0 && x.position == 1) != (y.played > 0 && y.position == 1) {
+            want.push(format!("s{k}_pts"));
+        }
+        if (x.played, x.won, x.drawn, x.lost, x.scored, x.conceded, x.team)
+            != (y.played, y.won, y.drawn, y.lost, y.scored, y.conceded, y.team)
+        {
+            want.push(format!("s{k}_stats"));
+        }
+    }
+    want.push(format!("g{game}_save"));
+    want.push(format!("g{game}_done"));
+    want
+}
+
+#[test]
+fn bringing_the_tournament_up_to_date_sends_only_what_changed() {
+    let db = db();
+    let (_, edit, _) = create(&db, person());
+    let mut bob = connect(&db, person(), &format!("/{edit}"));
+    let before = db.tournaments().all().unwrap().remove(0);
+
+    bob.write("score.g0.h", json!(2));
+    bob.write("score.g0.a", json!(1));
+    let put = bob.press("g0_save");
+    let after = db.tournaments().all().unwrap().remove(0);
+    let list = changed_standings(&before, &after, 0);
+    let want: Vec<&str> = list.iter().map(String::as_str).collect();
+    assert_eq!(sent_ids(&put), want);
+    assert!(removed_ids(&put).is_empty());
+    // Again without any change: nothing goes over the wire.
+    assert_eq!(bob.refresh(), "");
+
+    // A second save is likewise against what is on screen.
+    bob.write("score.g1.h", json!(0));
+    bob.write("score.g1.a", json!(0));
+    let put = bob.press("g1_save");
+    let shown = after;
+    let after = db.tournaments().all().unwrap().remove(0);
+    let list = changed_standings(&shown, &after, 1);
+    let want: Vec<&str> = list.iter().map(String::as_str).collect();
+    assert_eq!(sent_ids(&put), want, "{put}");
+    bob.clean();
 }
 
 #[test]

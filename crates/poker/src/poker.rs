@@ -242,10 +242,12 @@ pub struct Poker {
     /// The round the vote input was last filled for, so that a refresh does
     /// not wipe a number being typed.
     shown_round: Option<u32>,
-    /// Ids of the elements that are replaced as a whole.
-    mine_ids: Vec<String>,
-    player_ids: Vec<String>,
-    history_ids: Vec<String>,
+    /// The elements sent last, so that a refresh re-sends only what changed.
+    mine: Vec<Element>,
+    players: Vec<Element>,
+    history: Vec<Element>,
+    /// The `room` signal last shown, so that an unchanged room stays silent.
+    shown_room: Option<Value>,
 }
 
 impl Poker {
@@ -260,9 +262,10 @@ impl Poker {
             open: None,
             seen: 0,
             shown_round: None,
-            mine_ids: Vec::new(),
-            player_ids: Vec::new(),
-            history_ids: Vec::new(),
+            mine: Vec::new(),
+            players: Vec::new(),
+            history: Vec::new(),
+            shown_room: None,
         }
     }
 
@@ -270,23 +273,30 @@ impl Poker {
         self.viewer.to_string()
     }
 
-    /// Replaces the elements `ids` with `new`.
-    fn replace(out: &mut Outbox, ids: &mut Vec<String>, new: Vec<Element>) {
-        for id in ids.drain(..) {
-            out.remove(id);
+    // New elements land at the end of their parent, which is where they
+    // belong, and later ones in a list keep their order, so sending only the
+    // ones that changed is enough whatever shifts the id numbering.
+    fn replace(out: &mut Outbox, shown: &mut Vec<Element>, new: Vec<Element>) {
+        for e in &new {
+            if !shown.contains(e) {
+                out.element(e.clone());
+            }
         }
-        for e in new {
-            ids.push(e.id.clone());
-            out.element(e);
+        for e in shown.iter() {
+            if !new.iter().any(|n| n.id == e.id) {
+                out.remove(e.id.as_str());
+            }
         }
+        *shown = new;
     }
 
     /// Switches to `view`, dropping what belonged to the one before.
     fn show(&mut self, out: &mut Outbox, view: View) {
-        Self::replace(out, &mut self.player_ids, Vec::new());
-        Self::replace(out, &mut self.history_ids, Vec::new());
+        Self::replace(out, &mut self.players, Vec::new());
+        Self::replace(out, &mut self.history, Vec::new());
         self.open = None;
         self.shown_round = None;
+        self.shown_room = None;
         self.view = view;
         out.signal(json!({
             "view": view.name(),
@@ -327,7 +337,7 @@ impl Poker {
             })
             .collect();
         out.signal(json!({"has_mine": !mine.is_empty()}));
-        Self::replace(out, &mut self.mine_ids, buttons);
+        Self::replace(out, &mut self.mine, buttons);
     }
 
     fn missing(&mut self, out: &mut Outbox) {
@@ -438,7 +448,7 @@ impl Poker {
         }
 
         let next = round.map_or(1, |x| x.number + 1);
-        out.signal(json!({"room": {
+        let shown_room = json!({"room": {
             "title": r.title,
             "link": format!("{}/{}", self.origin, r.id.0),
             "is_owner": is_owner,
@@ -464,7 +474,11 @@ impl Poker {
                 format!("Start round {next}")
             },
             "has_history": !r.history.is_empty(),
-        }}));
+        }});
+        if Some(&shown_room) != self.shown_room.as_ref() {
+            out.signal(shown_room.clone());
+            self.shown_room = Some(shown_room);
+        }
 
         // Who is in, and what they voted once it is revealed. Votes of people
         // who left since are shown too.
@@ -518,7 +532,7 @@ impl Poker {
                 );
             }
         }
-        Self::replace(out, &mut self.player_ids, elements);
+        Self::replace(out, &mut self.players, elements);
 
         let lines = r
             .history
@@ -532,7 +546,7 @@ impl Poker {
                 ))
             })
             .collect();
-        Self::replace(out, &mut self.history_ids, lines);
+        Self::replace(out, &mut self.history, lines);
     }
 
     /// Changes the open room, if `change` says so, and shows how it is now.

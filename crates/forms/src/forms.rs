@@ -193,11 +193,13 @@ pub struct Forms {
     /// The shape of the answer signal set up for each field on screen, so
     /// that an edit only resets the answers it has to.
     answer_shapes: HashMap<u32, (Kind, Vec<String>)>,
-    /// Ids of the elements that are replaced as a whole.
-    mine_ids: Vec<String>,
-    draft_ids: Vec<String>,
-    fill_ids: Vec<String>,
-    result_ids: Vec<String>,
+    /// The elements sent last, so that a refresh re-sends only what changed.
+    mine: Vec<Element>,
+    editor: Vec<Element>,
+    fill: Vec<Element>,
+    result: Vec<Element>,
+    /// The `form` signal last shown, so that an unchanged form stays silent.
+    shown_form: Option<Value>,
 }
 
 impl Forms {
@@ -214,10 +216,11 @@ impl Forms {
             draft: Vec::new(),
             next_field: 0,
             answer_shapes: HashMap::new(),
-            mine_ids: Vec::new(),
-            draft_ids: Vec::new(),
-            fill_ids: Vec::new(),
-            result_ids: Vec::new(),
+            mine: Vec::new(),
+            editor: Vec::new(),
+            fill: Vec::new(),
+            result: Vec::new(),
+            shown_form: None,
         }
     }
 
@@ -225,29 +228,36 @@ impl Forms {
         self.viewer.to_string()
     }
 
-    /// Replaces the elements `ids` with `new`.
-    fn replace(out: &mut Outbox, ids: &mut Vec<String>, new: Vec<Element>) {
-        for id in ids.drain(..) {
-            out.remove(id);
+    // New elements land at the end of their parent, which is where they
+    // belong, and later ones in a list keep their order, so sending only the
+    // ones that changed is enough whatever shifts the id numbering.
+    fn replace(out: &mut Outbox, shown: &mut Vec<Element>, new: Vec<Element>) {
+        for e in &new {
+            if !shown.contains(e) {
+                out.element(e.clone());
+            }
         }
-        for e in new {
-            ids.push(e.id.clone());
-            out.element(e);
+        for e in shown.iter() {
+            if !new.iter().any(|n| n.id == e.id) {
+                out.remove(e.id.as_str());
+            }
         }
+        *shown = new;
     }
 
     /// Switches to `view`, dropping what belonged to the one before.
     fn show(&mut self, out: &mut Outbox, view: View) {
         if view != View::Edit {
-            Self::replace(out, &mut self.draft_ids, Vec::new());
+            Self::replace(out, &mut self.editor, Vec::new());
         }
         if view != View::Fill {
-            Self::replace(out, &mut self.fill_ids, Vec::new());
+            Self::replace(out, &mut self.fill, Vec::new());
             self.answer_shapes.clear();
         }
         if view != View::Results {
-            Self::replace(out, &mut self.result_ids, Vec::new());
+            Self::replace(out, &mut self.result, Vec::new());
         }
+        self.shown_form = None;
         if !matches!(view, View::Fill | View::Results) {
             self.open = None;
         }
@@ -292,7 +302,7 @@ impl Forms {
             })
             .collect();
         out.signal(json!({"has_mine": !forms.is_empty()}));
-        Self::replace(out, &mut self.mine_ids, buttons);
+        Self::replace(out, &mut self.mine, buttons);
     }
 
     fn missing(&mut self, out: &mut Outbox) {
@@ -434,7 +444,7 @@ impl Forms {
                     .on_press(Handler::action("remove").payload(id)),
             );
         }
-        Self::replace(out, &mut self.draft_ids, elements);
+        Self::replace(out, &mut self.editor, elements);
     }
 
     /// Moves, adds or removes a question of the editor.
@@ -665,7 +675,11 @@ impl Forms {
             return self.missing(out);
         };
         self.seen = f.version;
-        out.signal(self.form_signal(&f, n, mine.is_some()));
+        let shown_form = self.form_signal(&f, n, mine.is_some());
+        if Some(&shown_form) != self.shown_form.as_ref() {
+            out.signal(shown_form.clone());
+            self.shown_form = Some(shown_form);
+        }
         let mut answers = Map::new();
         for field in &f.fields {
             let shape = (field.kind, field.options.clone());
@@ -736,7 +750,7 @@ impl Forms {
                 }
             }
         }
-        Self::replace(out, &mut self.fill_ids, elements);
+        Self::replace(out, &mut self.fill, elements);
     }
 
     fn submit(&mut self, out: &mut Outbox, action: &Action) {
@@ -809,9 +823,17 @@ impl Forms {
         };
         self.seen = f.version;
         let me = self.me();
-        out.signal(self.form_signal(&f, responses.len(), responses.iter().any(|r| r.key == me)));
+        let shown_form = self.form_signal(
+            &f,
+            responses.len(),
+            responses.iter().any(|r| r.key == me),
+        );
+        if Some(&shown_form) != self.shown_form.as_ref() {
+            out.signal(shown_form.clone());
+            self.shown_form = Some(shown_form);
+        }
         if !(f.public || f.owner == me) {
-            return Self::replace(out, &mut self.result_ids, Vec::new());
+            return Self::replace(out, &mut self.result, Vec::new());
         }
         responses.sort_by_key(|r| std::cmp::Reverse(r.at));
         let total = responses.len();
@@ -885,7 +907,7 @@ impl Forms {
                 );
             }
         }
-        Self::replace(out, &mut self.result_ids, elements);
+        Self::replace(out, &mut self.result, elements);
     }
 
     /// Opens the form the action names, in `view`.

@@ -11,26 +11,29 @@ struct Loopback {
 }
 
 impl Loopback {
-    fn receive(&mut self, line: &str) {
+    fn receive(&mut self, line: &str) -> String {
         match RendererMessage::parse(line.trim_end()) {
             Ok(RendererMessage::Hello { params }) => self.app.hello(&mut self.out, &params),
             Ok(RendererMessage::Action(a)) => self.app.action(&mut self.out, &a),
             Err(e) => panic!("{e:?}"),
         }
-        self.pump();
+        self.pump()
     }
 
-    fn pump(&mut self) {
+    /// Sends what the app wrote and returns it, the way the wire would.
+    fn pump(&mut self) -> String {
         let out = self.out.take();
         self.client.receive(out.as_bytes());
+        out
     }
 
-    fn press(&mut self, id: &str) {
+    /// Presses a button and returns what was sent in answer.
+    fn press(&mut self, id: &str) -> String {
         let line = self
             .client
             .trigger(id, "onPress")
             .unwrap_or_else(|| panic!("{id} cannot be pressed"));
-        self.receive(&line);
+        self.receive(&line)
     }
 
     /// Presses a button that only changes the renderer's own signals.
@@ -52,9 +55,15 @@ impl Loopback {
         self.client.write(path, value);
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self) -> String {
         self.app.tick(&mut self.out, 0.0);
-        self.pump();
+        self.pump()
+    }
+
+    /// Brings the screen up to date and returns what had to be sent.
+    fn refresh(&mut self) -> String {
+        self.app.refresh(&mut self.out);
+        self.pump()
     }
 
     fn view(&self) -> &str {
@@ -117,6 +126,28 @@ fn id_of(link: &str) -> String {
     link.strip_prefix(&format!("{ORIGIN}/"))
         .expect("the link is on the origin")
         .to_owned()
+}
+
+/// The ids of the elements that a batch sends, in order.
+fn sent_ids(batch: &str) -> Vec<&str> {
+    batch
+        .lines()
+        .filter_map(|l| {
+            l.strip_prefix("element {\"id\":\"")
+                .map(|rest| &rest[..rest.find('"').unwrap()])
+        })
+        .collect()
+}
+
+/// The ids of the elements that a batch takes away.
+fn removed_ids(batch: &str) -> Vec<&str> {
+    batch
+        .lines()
+        .filter_map(|l| {
+            l.strip_prefix("remove {\"id\":\"")
+                .map(|rest| &rest[..rest.find('"').unwrap()])
+        })
+        .collect()
 }
 
 /// Olga sets up a bake-off of three cakes with four judges, and gets the
@@ -260,6 +291,28 @@ fn high_and_low_are_dropped_from_three_scores_on() {
 }
 
 #[test]
+fn bringing_the_sheet_up_to_date_sends_nothing_it_need_not() {
+    let db = db();
+    let (_, _, judges) = create(&db, person());
+    let mut ann = connect(&db, person(), &format!("/{}", judges[0]));
+    assert_eq!(ann.view(), "contest");
+    // Just drawn, and brought up to date again: nothing to send.
+    assert_eq!(ann.refresh(), "");
+
+    // Scoring two entries: only signals; no element needs re-sending, and
+    // what she is typing in the third survives.
+    ann.write("score.e0", json!(9));
+    ann.write("score.e1", json!(6));
+    let put = ann.press("save_btn");
+    assert!(sent_ids(&put).is_empty(), "{put}");
+    assert!(removed_ids(&put).is_empty());
+    assert_eq!(ann.client.value("score.e1"), Some(&json!(6)));
+    assert_eq!(ann.text("sheet_mine"), "You have scored 2 of 3 entries.");
+    assert_eq!(ann.refresh(), "");
+    ann.clean();
+}
+
+#[test]
 fn judges_score_privately_and_the_leaderboard_appears_when_revealed() {
     let db = db();
     let (mut olga, view, judges) = create(&db, person());
@@ -293,7 +346,7 @@ fn judges_score_privately_and_the_leaderboard_appears_when_revealed() {
     let mut bo = connect(&db, person(), &format!("/{}", judges[1]));
     assert_eq!(bo.attr("sheet", "title"), "Scorecard of Bo");
     for k in 0..3 {
-        assert_eq!(bo.client.value(&format!("score.e{k}")), Some(&json!("")));
+        assert_eq!(bo.client.value(&format!("score.e{k}")), None);
     }
     bo.write("score.e0", json!("7"));
     bo.write("score.e1", json!("8"));
