@@ -33,6 +33,7 @@ use crate::db::{
 use crate::hub::{ChatKind, ChatLine, Event, Hub, Node, NodeGuard};
 use chrono::{Local, TimeZone};
 use hypereffect::signals::merge_patch;
+use hypereffect::vtree::{self, Node as Tree};
 use hypereffect::{cel, json, ui, Action, Element, Handler, Map, Metadata, Outbox, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -124,7 +125,7 @@ pub struct Bbs {
     hangup: bool,
     welcome: Welcome,
     /// The rows of the screen's list, as the renderer has them.
-    items: Vec<String>,
+    items: Vec<Tree>,
     /// Whether the screen says its subject is gone.
     gone: bool,
     /// The display signals (see the module documentation) as the renderer
@@ -896,11 +897,9 @@ impl Bbs {
             .into_iter()
             .rev()
             .take(most)
-            .map(|o| (format!("o{}", o.id.0), o))
+            .map(|o| oneliner_item(&hub.store, &o, list, dated).into())
             .collect();
-        reconcile(out, &mut self.items, &want, |o| {
-            vec![oneliner_item(&hub.store, o, list, dated)]
-        });
+        reconcile(out, &mut self.items, list, want);
     }
 
     // Message boards.
@@ -927,8 +926,8 @@ impl Bbs {
             })
             .collect();
         self.put(out, json!({"_v": {"about": about}}));
-        let want: Vec<_> = boards.into_iter().map(|b| (format!("b{}", b.id.0), b)).collect();
-        reconcile(out, &mut self.items, &want, board_item);
+        let want = boards.iter().map(board_item).collect();
+        reconcile(out, &mut self.items, "boards", want);
     }
 
     fn draw_board(&mut self, out: &mut Outbox, id: BoardId) {
@@ -980,8 +979,8 @@ impl Bbs {
             );
         }
         self.put(out, json!({"_v": {"new": new, "about": about}}));
-        let want: Vec<_> = topics.into_iter().map(|t| (format!("t{}", t.id.0), t)).collect();
-        reconcile(out, &mut self.items, &want, topic_item);
+        let want = topics.iter().map(topic_item).collect();
+        reconcile(out, &mut self.items, "topics", want);
     }
 
     fn draw_new_topic(&mut self, out: &mut Outbox, board: BoardId) {
@@ -1070,15 +1069,13 @@ impl Bbs {
         let Some(last) = store.topic(id).map(|t| t.last_post) else {
             return self.lost(out);
         };
-        let want: Vec<_> = store
-            .posts_of(id)
-            .into_iter()
-            .map(|p| (format!("p{}", p.id.0), p))
-            .collect();
         let key = &self.key;
-        reconcile(out, &mut self.items, &want, |p| {
-            post_item(store, p, sysop || p.author == *key)
-        });
+        let want = store
+            .posts_of(id)
+            .iter()
+            .map(|p| post_item(store, p, sysop || p.author == *key))
+            .collect();
+        reconcile(out, &mut self.items, "posts", want);
         let seen = store.user(key).and_then(|u| u.last_read.get(&id).copied());
         if seen != Some(last) {
             store.mark_read(&self.key, id, last);
@@ -1174,9 +1171,9 @@ impl Bbs {
             .iter()
             .rev()
             .take(CHAT_SHOWN)
-            .map(|l| (format!("chat{}", l.n), l))
+            .map(|l| chat_item(l).into())
             .collect();
-        reconcile(out, &mut self.items, &want, |l| vec![chat_item(l)]);
+        reconcile(out, &mut self.items, "chatlog", want);
     }
 
     fn say(&mut self, out: &mut Outbox, text: &str) {
@@ -1264,8 +1261,8 @@ impl Bbs {
             }
         }
         self.put(out, json!({"_v": {"who": who}}));
-        let want: Vec<_> = nodes.keys().map(|n| (format!("n{n}"), *n)).collect();
-        reconcile(out, &mut self.items, &want, |n| node_item(*n));
+        let want = nodes.keys().map(|n| node_item(*n)).collect();
+        reconcile(out, &mut self.items, "who", want);
     }
 
     fn page(&mut self, out: &mut Outbox, to: u32) {
@@ -1326,14 +1323,12 @@ impl Bbs {
             );
         }
         self.put(out, json!({"_v": {"count": users.len(), "users": view}}));
-        let want: Vec<_> = users
-            .into_iter()
-            .map(|u| (format!("u{}", u.key.0), u))
-            .collect();
         let me = &self.key;
-        reconcile(out, &mut self.items, &want, |u| {
-            user_item(u, u.key == *me, sysop)
-        });
+        let want = users
+            .iter()
+            .map(|u| user_item(u, u.key == *me, sysop))
+            .collect();
+        reconcile(out, &mut self.items, "users", want);
     }
 
     /// Pattern A of the server guide: the two buttons only ask, the reply
@@ -1404,8 +1399,8 @@ impl Bbs {
             .map(|l| (format!("l{}", l.id.0), (!l.read).into()))
             .collect();
         self.put(out, json!({"_v": {"new": new}}));
-        let want: Vec<_> = inbox.into_iter().map(|l| (format!("l{}", l.id.0), l)).collect();
-        reconcile(out, &mut self.items, &want, |l| letter_item(&hub.store, l));
+        let want = inbox.iter().map(|l| letter_item(&hub.store, l)).collect();
+        reconcile(out, &mut self.items, "inbox", want);
     }
 
     fn draw_letter(&mut self, out: &mut Outbox, id: LetterId) {
@@ -1550,15 +1545,15 @@ impl Bbs {
 
     fn sync_bulletins(&mut self, out: &mut Outbox) {
         let sysop = self.hub.is_sysop(&self.key);
-        let want: Vec<_> = self
+        let want = self
             .hub
             .store
             .bulletins()
-            .into_iter()
+            .iter()
             .rev()
-            .map(|b| (format!("bull{}", b.id.0), b))
+            .map(|b| bulletin_item(b, sysop))
             .collect();
-        reconcile(out, &mut self.items, &want, |b| bulletin_item(b, sysop));
+        reconcile(out, &mut self.items, "bulls", want);
     }
 
     fn post_bulletin(&mut self, out: &mut Outbox, title: &str, text: &str) {
@@ -1677,12 +1672,8 @@ impl Bbs {
             store.calls(),
         );
         self.put(out, json!({"_v": {"stats": stats}}));
-        let want: Vec<_> = store
-            .boards()
-            .into_iter()
-            .map(|b| (format!("sb{}", b.id.0), b))
-            .collect();
-        reconcile(out, &mut self.items, &want, sysop_board_item);
+        let want = store.boards().iter().map(sysop_board_item).collect();
+        reconcile(out, &mut self.items, "sys_board_list", want);
     }
 
     fn new_board(&mut self, out: &mut Outbox, name: &str, desc: &str) {
@@ -1726,60 +1717,15 @@ impl Drop for Bbs {
     }
 }
 
-/// Brings the rows of a list on screen to `want`, in order, with the fewest
+/// Brings the rows of `list` on screen to `want`, in order, with the fewest
 /// messages: removes the rows that went away (with their children), inserts
-/// the new ones where they belong and moves those out of place, by re-sending
-/// just the row with `before`. Rows already in place get nothing.
+/// the new ones where they belong, moves those out of place and re-sends
+/// what changed in the others. Rows already as wanted get nothing.
 ///
-/// `items` is the list's rows as the renderer has them. `build` makes a
-/// row and its children, the row first, and is also the row's only
-/// builder when it moves.
-fn reconcile<T>(
-    out: &mut Outbox,
-    items: &mut Vec<String>,
-    want: &[(String, T)],
-    build: impl Fn(&T) -> Vec<Element>,
-) {
-    items.retain(|id| {
-        let keep = want.iter().any(|(w, _)| w == id);
-        if !keep {
-            out.remove(id.as_str());
-        }
-        keep
-    });
-    // From the end, so the row each one goes before is already in place.
-    for i in (0..want.len()).rev() {
-        let (id, item) = &want[i];
-        let next = want.get(i + 1).map(|(n, _)| n);
-        match items.iter().position(|x| x == id) {
-            None => {
-                let mut elements = build(item).into_iter();
-                let Some(row) = elements.next() else { continue };
-                let at = next
-                    .and_then(|n| items.iter().position(|x| x == n))
-                    .unwrap_or(items.len());
-                out.element(match next {
-                    Some(n) => row.before(n.as_str()),
-                    None => row,
-                });
-                for e in elements {
-                    out.element(e);
-                }
-                items.insert(at, id.clone());
-            }
-            Some(p) => {
-                let Some(n) = next else { continue };
-                if items.get(p + 1) == Some(n) {
-                    continue;
-                }
-                let Some(row) = build(item).into_iter().next() else { continue };
-                out.element(row.before(n.as_str()));
-                items.remove(p);
-                let at = items.iter().position(|x| x == n).unwrap_or(items.len());
-                items.insert(at, id.clone());
-            }
-        }
-    }
+/// `items` is the list's rows as the renderer has them.
+fn reconcile(out: &mut Outbox, items: &mut Vec<Tree>, list: &str, want: Vec<Tree>) {
+    out.extend(vtree::diff_into(Some(list), items, &want));
+    *items = want;
 }
 
 /// The merge patch that turns `old` into `new`, if they differ.
@@ -1821,10 +1767,9 @@ fn oneliner_item(store: &Store, o: &Oneliner, list: &str, dated: bool) -> Elemen
     code(&format!("o{}", o.id.0), list, &text)
 }
 
-fn board_item(b: &Board) -> Vec<Element> {
+fn board_item(b: &Board) -> Tree {
     let row = format!("b{}", b.id.0);
-    vec![
-        ui::row(&row).parent("boards").wrap(true),
+    Tree::from(ui::row(&row).parent("boards").wrap(true)).children([
         nav(&format!("{row}_go"), &row, &b.name, Screen::Board { id: b.id }),
         ui::badge(format!("{row}_new"))
             .parent(&row)
@@ -1835,13 +1780,12 @@ fn board_item(b: &Board) -> Vec<Element> {
             .parent(&row)
             .variant("caption")
             .text(cel(format!("s._v.about.{row}"))),
-    ]
+    ])
 }
 
-fn topic_item(t: &Topic) -> Vec<Element> {
+fn topic_item(t: &Topic) -> Tree {
     let row = format!("t{}", t.id.0);
-    vec![
-        ui::row(&row).parent("topics").wrap(true),
+    Tree::from(ui::row(&row).parent("topics").wrap(true)).children([
         ui::badge(format!("{row}_new"))
             .parent(&row)
             .variant("info")
@@ -1852,14 +1796,14 @@ fn topic_item(t: &Topic) -> Vec<Element> {
             .parent(&row)
             .variant("caption")
             .text(cel(format!("s._v.about.{row}"))),
-    ]
+    ])
 }
 
 /// A post never changes, so it is all literals.
-fn post_item(store: &Store, p: &Post, can_delete: bool) -> Vec<Element> {
+fn post_item(store: &Store, p: &Post, can_delete: bool) -> Tree {
     let card = format!("p{}", p.id.0);
     let author = store.user(&p.author);
-    let mut els = vec![
+    let mut els = Tree::from(
         ui::card(&card)
             .parent("posts")
             .title(format!(
@@ -1869,21 +1813,19 @@ fn post_item(store: &Store, p: &Post, can_delete: bool) -> Vec<Element> {
                 when(p.at)
             ))
             .gap("small"),
-        body(&format!("{card}_body"), &card, &p.body),
-    ];
+    )
+    .child(body(&format!("{card}_body"), &card, &p.body));
     if let Some(tag) = author.map(|u| u.tagline).filter(|t| !t.is_empty()) {
-        els.push(caption(&format!("{card}_tag"), &card, &format!("-- {tag}")));
+        els = els.child(caption(&format!("{card}_tag"), &card, &format!("-- {tag}")));
     }
     if can_delete {
-        els.push(
-            submit(
-                &format!("{card}_del"),
-                &card,
-                "Delete",
-                "plain",
-                Handler::action("delete_post").payload(p.id.0),
-            ),
-        );
+        els = els.child(submit(
+            &format!("{card}_del"),
+            &card,
+            "Delete",
+            "plain",
+            Handler::action("delete_post").payload(p.id.0),
+        ));
     }
     els
 }
@@ -1900,11 +1842,10 @@ fn chat_item(line: &ChatLine) -> Element {
         .text(text)
 }
 
-fn node_item(n: u32) -> Vec<Element> {
+fn node_item(n: u32) -> Tree {
     let row = format!("n{n}");
     let v = format!("s._v.who.{row}");
-    vec![
-        ui::row(&row).parent("who").wrap(true),
+    Tree::from(ui::row(&row).parent("who").wrap(true)).children([
         ui::badge(format!("{row}_n")).parent(&row).text(format!("Node {n}")),
         ui::text(format!("{row}_who")).parent(&row).text(cel(format!("{v}.who"))),
         ui::text(format!("{row}_doing"))
@@ -1919,15 +1860,14 @@ fn node_item(n: u32) -> Vec<Element> {
             Handler::action("page").payload(n),
         )
         .visible(cel(format!("{v}.page"))),
-    ]
+    ])
 }
 
-fn user_item(u: &User, me: bool, sysop: bool) -> Vec<Element> {
+fn user_item(u: &User, me: bool, sysop: bool) -> Tree {
     let key = u.key.0.as_str();
     let row = format!("u{key}");
     let v = format!("s._v.users.{row}");
-    let mut els = vec![
-        ui::row(&row).parent("users").wrap(true),
+    let mut els = Tree::from(ui::row(&row).parent("users").wrap(true)).children([
         // Handles are forever.
         body(&format!("{row}_name"), &row, &u.handle),
         ui::badge(format!("{row}_sysop"))
@@ -1944,9 +1884,9 @@ fn user_item(u: &User, me: bool, sysop: bool) -> Vec<Element> {
             .parent(&row)
             .variant("caption")
             .text(cel(format!("{v}.about"))),
-    ];
+    ]);
     if !me {
-        els.push(nav(
+        els = els.child(nav(
             &format!("{row}_mail"),
             &row,
             "Write",
@@ -1960,7 +1900,7 @@ fn user_item(u: &User, me: bool, sysop: bool) -> Vec<Element> {
         // A payload is a literal, so the two requests are two buttons, and
         // the confirmed state picks the one to show.
         for (name, label, show) in [("ban", "Ban", "!"), ("unban", "Unban", "")] {
-            els.push(
+            els = els.child(
                 submit(
                     &format!("{row}_{name}"),
                     &row,
@@ -1975,10 +1915,9 @@ fn user_item(u: &User, me: bool, sysop: bool) -> Vec<Element> {
     els
 }
 
-fn letter_item(store: &Store, l: &Letter) -> Vec<Element> {
+fn letter_item(store: &Store, l: &Letter) -> Tree {
     let row = format!("l{}", l.id.0);
-    vec![
-        ui::row(&row).parent("inbox").wrap(true),
+    Tree::from(ui::row(&row).parent("inbox").wrap(true)).children([
         ui::badge(format!("{row}_new"))
             .parent(&row)
             .variant("info")
@@ -1990,18 +1929,16 @@ fn letter_item(store: &Store, l: &Letter) -> Vec<Element> {
             &row,
             &format!("from {} · {}", store.handle(&l.from), when(l.at)),
         ),
-    ]
+    ])
 }
 
-fn bulletin_item(b: &Bulletin, sysop: bool) -> Vec<Element> {
+fn bulletin_item(b: &Bulletin, sysop: bool) -> Tree {
     let card = format!("bull{}", b.id.0);
-    let mut els = vec![
-        ui::card(&card).parent("bulls").title(b.title.as_str()).gap("small"),
-        body(&format!("{card}_body"), &card, &b.body),
-        caption(&format!("{card}_at"), &card, &when(b.at)),
-    ];
+    let mut els = Tree::from(ui::card(&card).parent("bulls").title(b.title.as_str()).gap("small"))
+        .child(body(&format!("{card}_body"), &card, &b.body))
+        .child(caption(&format!("{card}_at"), &card, &when(b.at)));
     if sysop {
-        els.push(submit(
+        els = els.child(submit(
             &format!("{card}_del"),
             &card,
             "Delete",
@@ -2012,10 +1949,9 @@ fn bulletin_item(b: &Bulletin, sysop: bool) -> Vec<Element> {
     els
 }
 
-fn sysop_board_item(b: &Board) -> Vec<Element> {
+fn sysop_board_item(b: &Board) -> Tree {
     let row = format!("sb{}", b.id.0);
-    vec![
-        ui::row(&row).parent("sys_board_list"),
+    Tree::from(ui::row(&row).parent("sys_board_list")).children([
         body(&format!("{row}_name"), &row, &b.name),
         submit(
             &format!("{row}_del"),
@@ -2024,7 +1960,7 @@ fn sysop_board_item(b: &Board) -> Vec<Element> {
             "failure",
             Handler::action("delete_board").payload(b.id.0),
         ),
-    ]
+    ])
 }
 
 /// The default login art: the board's name in a box.

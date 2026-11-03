@@ -17,4 +17,4 @@ cuid2 = "0.1"
 blake3 = "1"
 
 [dev-dependencies]
-hypereffect = { workspace = true, features = ["client"] }
+hypereffect.workspace = true

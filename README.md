@@ -1,19 +1,9 @@
 # hyperutils
 
-Small, deliberately unglamorous tools for the everyday problems that come up
-when people have to organise things together.
-
-Not every problem needs a startup. Sometimes you just need a sign-up sheet, a
-way to find a time everyone can meet, or somewhere to write down the results of
-a tournament. These tools are for exactly those jobs — the boring, mundane,
-real-world kind that still need solving. Each one does a single useful thing,
-and they are meant to be shared with a link and used without creating an
-account or remembering a password.
+Small, deliberately unglamorous tools for the everyday problems.
 
 ## The tools
 
-- **Bulletin board** — an old-school message board for discussions, private
-  messages, and live chat.
 - **Meeting planner** — a Doodle-style scheduler. Share a code, mark the times
   that suit you, and see everyone's answers update live.
 - **Forms** — build a form, share it, and read the answers as they come in.
@@ -31,3 +21,5 @@ account or remembering a password.
 - **Judged contests** — each judge gets a private link that knows their name.
   The highest and lowest scores are dropped, and a leaderboard appears when the
   organiser chooses to reveal it.
+- **Bulletin board** — an old-school message board for discussions, private
+  messages, and live chat.

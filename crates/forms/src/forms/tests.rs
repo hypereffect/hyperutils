@@ -2,6 +2,7 @@ use super::*;
 use hyperb_core::identity::Identity;
 use hypereffect::RendererMessage;
 use hypereffect::client::Client;
+use std::collections::BTreeSet;
 
 /// A renderer and a session, wired together the way `run_app` does.
 struct Loopback {
@@ -11,6 +12,11 @@ struct Loopback {
 }
 
 impl Loopback {
+    /// The id of the first row of `list`.
+    fn first(&self, list: &str) -> String {
+        self.client.children(Some(list))[0].clone()
+    }
+
     fn receive(&mut self, line: &str) -> String {
         match RendererMessage::parse(line.trim_end()) {
             Ok(RendererMessage::Hello { params }) => self.app.hello(&mut self.out, &params),
@@ -161,8 +167,8 @@ fn create(db: &Arc<Db>, key: PublicKey) -> (Loopback, String) {
     (ann, id)
 }
 
-/// The ids of the elements that a batch sends, in order.
-fn sent_ids(batch: &str) -> Vec<&str> {
+/// The ids of the elements that a batch sends.
+fn sent_ids(batch: &str) -> BTreeSet<&str> {
     batch
         .lines()
         .filter_map(|l| {
@@ -173,7 +179,7 @@ fn sent_ids(batch: &str) -> Vec<&str> {
 }
 
 /// The ids of the elements that a batch takes away.
-fn removed_ids(batch: &str) -> Vec<&str> {
+fn removed_ids(batch: &str) -> BTreeSet<&str> {
     batch
         .lines()
         .filter_map(|l| {
@@ -217,14 +223,17 @@ fn bringing_the_form_up_to_date_sends_only_what_changed() {
     assert_eq!(ann.refresh_results(), "");
 
     // An answer comes in: its count, its line, and the changed share; the
-    // totals of the untouched questions stay as they are.
+    // totals of the untouched questions stay as they are, and so does the
+    // line of Ann's answer.
     let mut bob = connect(&db, person(), &format!("/{id}"));
     bob.write("answer.f0", json!("Bob"));
     bob.press("submit_btn");
     let put = ann.tick();
+    let lines = ann.client.children(Some("r0"));
+    let line = lines.iter().find(|l| ann.text(l) == json!("Bob")).unwrap();
     assert_eq!(
         sent_ids(&put),
-        ["r0_count", "r0_1", "r1_count", "r1_o0", "r2_count"],
+        BTreeSet::from(["r0_count", line, "r1_count", "r1_o0", "r2_count"]),
         "{put}"
     );
     assert!(removed_ids(&put).is_empty());
@@ -310,14 +319,17 @@ fn create_share_fill_and_read_results() {
     assert_eq!(ann.client.attr("r1_o1", "value"), Some(json!(1.0)));
     assert_eq!(ann.client.attr("r2_o0", "value"), Some(json!(1.0)));
     assert_eq!(ann.client.attr("r2_o2", "value"), Some(json!(0.5)));
-    let names = [ann.text("r0_0"), ann.text("r0_1")];
+    let names: Vec<Value> = ann.client.children(Some("r0"))[1..]
+        .iter()
+        .map(|line| ann.text(line))
+        .collect();
     assert!(names.contains(&json!("Bob")) && names.contains(&json!("Cy")));
     ann.clean();
 
     // She comes back later and finds the form on her start page.
     let mut ann = connect(&db, ann_key, "/");
     assert!(ann.visible("mine"));
-    let label = ann.client.attr("mine_0", "label").unwrap();
+    let label = ann.client.attr(&ann.first("mine_list"), "label").unwrap();
     assert!(
         label
             .as_str()
@@ -325,7 +337,7 @@ fn create_share_fill_and_read_results() {
             .starts_with("Offsite · 2 responses · "),
         "{label}"
     );
-    ann.press("mine_0");
+    ann.press(&ann.first("mine_list"));
     assert_eq!(ann.view(), "results");
     assert_eq!(ann.text("count"), json!("2 responses"));
     ann.clean();
@@ -356,6 +368,7 @@ fn the_owner_edits_and_publishes_while_people_watch() {
     );
     ann.press("d1_remove");
     ann.press("d2_up");
+    assert_eq!(ann.client.children(Some("draft_fields")), ["d2", "d0"]);
     assert_eq!(ann.client.attr("d2", "title"), Some(json!("Question 1")));
     assert_eq!(ann.client.attr("d2_up", "disabled"), Some(json!(true)));
     ann.press("add_btn");
@@ -491,7 +504,7 @@ fn forms_survive_a_restart() {
 
     let db = Arc::new(Db::open(&path).unwrap());
     let mut ann = connect(&db, ann_key, "/");
-    ann.press("mine_0");
+    ann.press(&ann.first("mine_list"));
     assert_eq!(ann.text("form_title"), json!("Offsite"));
     assert_eq!(ann.text("share_link"), json!(format!("{ORIGIN}/{id}")));
 }

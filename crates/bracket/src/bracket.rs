@@ -20,7 +20,8 @@
 
 use crate::store::{self, Bracket, BracketId, Db, EditId, EditLink, Owner, OwnerKey, WriteTx};
 use hyperb_core::identity::PublicKey;
-use hypereffect::{Action, App, Element, Handler, Metadata, Outbox, Value, cel, json, ui};
+use hypereffect::vtree::{self, Node};
+use hypereffect::{Action, App, Handler, Metadata, Outbox, Value, cel, json, ui};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -380,6 +381,37 @@ fn read_pick(action: &Action, k: usize, teams: usize) -> Pick {
 
 /// The score signal: numbers, as number inputs bind them, or nothing when
 /// the match has no result.
+/// The inputs for the result of match `g`, between `home` and `away`.
+fn score_row(g: usize, home: &str, away: &str, score: Option<[u32; 2]>) -> Node {
+    let id = format!("g{g}");
+    let row = vtree::row(&id).wrap(true).children([
+        vtree::text(format!("{id}_n"))
+            .variant("caption")
+            .text(format!("{}.", g + 1)),
+        vtree::text(format!("{id}_home")).text(home),
+        vtree::input(format!("{id}_h"))
+            .variant("number")
+            .bind(format!("score.{id}.h")),
+        vtree::text(format!("{id}_dash")).text("–"),
+        vtree::input(format!("{id}_a"))
+            .variant("number")
+            .bind(format!("score.{id}.a")),
+        vtree::text(format!("{id}_away")).text(away),
+        vtree::button(format!("{id}_save"))
+            .label(if score.is_some() { "Update" } else { "Save" })
+            .variant(if score.is_some() { "plain" } else { "primary" })
+            .on_press(Handler::action("score").payload(g)),
+    ]);
+    match score {
+        Some(_) => row.child(
+            vtree::badge(format!("{id}_done"))
+                .variant("success")
+                .text("Played"),
+        ),
+        None => row,
+    }
+}
+
 fn score_signal(score: Option<[u32; 2]>) -> Value {
     match score {
         Some([h, a]) => json!({"h": h, "a": a}),
@@ -436,10 +468,10 @@ pub struct Brackets {
     /// The scores on screen, by match, so that a refresh only resets the
     /// inputs of the matches whose result changed.
     shown: Vec<Option<[u32; 2]>>,
-    /// The elements sent last, so that a refresh re-sends only what changed.
-    mine: Vec<Element>,
-    seed: Vec<Element>,
-    rounds: Vec<Element>,
+    /// The trees sent last, so that a refresh re-sends only what changed.
+    mine: Vec<Node>,
+    seed: Vec<Node>,
+    rounds: Vec<Node>,
     /// The `t` signal last shown, so that an unchanged bracket stays silent.
     shown_t: Option<Value>,
 }
@@ -468,27 +500,17 @@ impl Brackets {
         self.viewer.to_string()
     }
 
-    // New elements land at the end of their parent, which is where they
-    // belong, and later ones in a list keep their order, so sending only the
-    // ones that changed is enough whatever shifts the id numbering.
-    fn replace(out: &mut Outbox, shown: &mut Vec<Element>, new: Vec<Element>) {
-        for e in &new {
-            if !shown.contains(e) {
-                out.element(e.clone());
-            }
-        }
-        for e in shown.iter() {
-            if !new.iter().any(|n| n.id == e.id) {
-                out.remove(e.id.as_str());
-            }
-        }
+    /// Turns the children of `mount` from `shown` into `new`, sending only
+    /// the difference.
+    fn replace(out: &mut Outbox, mount: &str, shown: &mut Vec<Node>, new: Vec<Node>) {
+        out.extend(vtree::diff_into(Some(mount), shown, &new));
         *shown = new;
     }
 
     /// Switches to `view`, dropping what belonged to the one before.
     fn show(&mut self, out: &mut Outbox, view: View) {
-        Self::replace(out, &mut self.seed, Vec::new());
-        Self::replace(out, &mut self.rounds, Vec::new());
+        Self::replace(out, "seed_matches", &mut self.seed, Vec::new());
+        Self::replace(out, "rounds", &mut self.rounds, Vec::new());
         self.open = None;
         self.can_edit = false;
         self.shown.clear();
@@ -515,11 +537,9 @@ impl Brackets {
         });
         let buttons = mine
             .iter()
-            .enumerate()
-            .map(|(k, b)| {
+            .map(|b| {
                 let (played, total) = progress(b);
-                ui::button(format!("mine_{k}"))
-                    .parent("mine_list")
+                vtree::button(format!("mine_{}", b.id.0))
                     .label(format!(
                         "{} · {} teams · {played} of {total} matches played",
                         b.name,
@@ -529,7 +549,7 @@ impl Brackets {
             })
             .collect();
         out.signal(json!({"has_mine": !mine.is_empty()}));
-        Self::replace(out, &mut self.mine, buttons);
+        Self::replace(out, "mine_list", &mut self.mine, buttons);
     }
 
     fn missing(&mut self, out: &mut Outbox) {
@@ -583,27 +603,19 @@ impl Brackets {
         // not linger.
         out.signal(json!({"seed": null}));
         out.signal(json!({"seed": picks, "seed_info": info}));
-        let mut elements = Vec::new();
-        for m in 0..size / 2 {
+        let cards = (0..size / 2).map(|m| {
             let card = format!("pm{m}");
-            elements.push(
-                ui::card(&card)
-                    .parent("seed_matches")
-                    .title(format!("Match {}", m + 1))
-                    .gap("small"),
-            );
-            let row = format!("{card}_row");
-            elements.push(ui::row(&row).parent(&card).wrap(true));
-            for k in [2 * m, 2 * m + 1] {
-                elements.push(
-                    ui::select(format!("pick{k}"))
-                        .parent(&row)
-                        .options(options.clone())
-                        .bind(format!("seed.s{k}")),
-                );
-            }
-        }
-        Self::replace(out, &mut self.seed, elements);
+            let picks = [2 * m, 2 * m + 1].map(|k| {
+                vtree::select(format!("pick{k}"))
+                    .options(options.clone())
+                    .bind(format!("seed.s{k}"))
+            });
+            vtree::card(&card)
+                .title(format!("Match {}", m + 1))
+                .gap("small")
+                .child(vtree::row(format!("{card}_row")).wrap(true).children(picks))
+        });
+        Self::replace(out, "seed_matches", &mut self.seed, cards.collect());
         self.draft = Some(Draft { name, teams });
     }
 
@@ -734,17 +746,13 @@ impl Brackets {
 
         let rounds = matches(b);
         let team = |t: u32| b.teams[t as usize].as_str();
-        let mut elements = Vec::new();
+        let mut cards = Vec::new();
         // The number of the first match of the round, counting from 0.
         let mut first = 0;
         for (r, round) in rounds.iter().enumerate() {
-            let card = format!("round{r}");
-            elements.push(
-                ui::card(&card)
-                    .parent("rounds")
-                    .title(round_name(r, rounds.len()))
-                    .gap("small"),
-            );
+            let mut card = vtree::card(format!("round{r}"))
+                .title(round_name(r, rounds.len()))
+                .gap("small");
             let before = first - if r > 0 { rounds[r - 1].len() } else { 0 };
             let side = |i: usize, s: usize| match round[i].sides[s] {
                 Side::Team(t) => team(t).to_owned(),
@@ -755,81 +763,27 @@ impl Brackets {
                 let g = first + i;
                 let id = format!("g{g}");
                 let n = g + 1;
-                match m.sides {
-                    [Side::Team(t), Side::Bye] | [Side::Bye, Side::Team(t)] => {
-                        elements.push(
-                            ui::text(id)
-                                .parent(&card)
-                                .variant("caption")
-                                .text(format!("{n}. {} goes through with a bye", team(t))),
-                        );
-                    }
+                card = card.child(match m.sides {
+                    [Side::Team(t), Side::Bye] | [Side::Bye, Side::Team(t)] => vtree::text(id)
+                        .variant("caption")
+                        .text(format!("{n}. {} goes through with a bye", team(t))),
                     [Side::Team(h), Side::Team(a)] if self.can_edit => {
-                        elements.extend(self.score_row(&card, g, team(h), team(a), m.score));
+                        score_row(g, team(h), team(a), m.score)
                     }
                     [Side::Team(h), Side::Team(a)] => {
                         let line = match m.score {
                             Some([x, y]) => format!("{n}. {}  {x} – {y}  {}", team(h), team(a)),
                             None => format!("{n}. {}  vs  {}", team(h), team(a)),
                         };
-                        elements.push(ui::text(id).parent(&card).text(line));
+                        vtree::text(id).text(line)
                     }
-                    _ => {
-                        elements.push(ui::text(id).parent(&card).text(format!(
-                            "{n}. {}  vs  {}",
-                            side(i, 0),
-                            side(i, 1)
-                        )));
-                    }
-                }
+                    _ => vtree::text(id).text(format!("{n}. {}  vs  {}", side(i, 0), side(i, 1))),
+                });
             }
+            cards.push(card);
             first += round.len();
         }
-        Self::replace(out, &mut self.rounds, elements);
-    }
-
-    /// The inputs for the result of match `g`, between `home` and `away`.
-    fn score_row(
-        &self,
-        card: &str,
-        g: usize,
-        home: &str,
-        away: &str,
-        score: Option<[u32; 2]>,
-    ) -> Vec<Element> {
-        let id = format!("g{g}");
-        let mut elements = vec![
-            ui::row(&id).parent(card).wrap(true),
-            ui::text(format!("{id}_n"))
-                .parent(&id)
-                .variant("caption")
-                .text(format!("{}.", g + 1)),
-            ui::text(format!("{id}_home")).parent(&id).text(home),
-            ui::input(format!("{id}_h"))
-                .parent(&id)
-                .variant("number")
-                .bind(format!("score.{id}.h")),
-            ui::text(format!("{id}_dash")).parent(&id).text("–"),
-            ui::input(format!("{id}_a"))
-                .parent(&id)
-                .variant("number")
-                .bind(format!("score.{id}.a")),
-            ui::text(format!("{id}_away")).parent(&id).text(away),
-            ui::button(format!("{id}_save"))
-                .parent(&id)
-                .label(if score.is_some() { "Update" } else { "Save" })
-                .variant(if score.is_some() { "plain" } else { "primary" })
-                .on_press(Handler::action("score").payload(g)),
-        ];
-        if score.is_some() {
-            elements.push(
-                ui::badge(format!("{id}_done"))
-                    .parent(&id)
-                    .variant("success")
-                    .text("Played"),
-            );
-        }
-        elements
+        Self::replace(out, "rounds", &mut self.rounds, cards);
     }
 
     /// Saves, corrects or clears the result of the match the action names.

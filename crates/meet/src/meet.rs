@@ -15,7 +15,8 @@
 
 use crate::store::{self, Answer, Code, Db, Meeting, Person, PersonKey, WriteTx};
 use hyperb_core::identity::PublicKey;
-use hypereffect::{Action, App, Element, Handler, Map, Metadata, Outbox, Value, cel, json, ui};
+use hypereffect::vtree::{self, Node};
+use hypereffect::{Action, App, Handler, Map, Metadata, Outbox, Value, cel, json, ui};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -139,10 +140,11 @@ pub struct Meet {
     seen: u64,
     /// How many options the open meeting has.
     options: usize,
-    /// The elements sent last, so that a refresh re-sends only what changed.
-    mine: Vec<Element>,
-    meeting: Vec<Element>,
-    rows: Vec<Element>,
+    /// The trees sent last, so that a refresh re-sends only what changed.
+    mine: Vec<Node>,
+    choices: Vec<Node>,
+    tallies: Vec<Node>,
+    rows: Vec<Node>,
     /// The `meeting` and `results` signals last shown, so that an unchanged
     /// meeting stays silent.
     shown_meeting: Option<Value>,
@@ -157,26 +159,17 @@ impl Meet {
             seen: 0,
             options: 0,
             mine: Vec::new(),
-            meeting: Vec::new(),
+            choices: Vec::new(),
+            tallies: Vec::new(),
             rows: Vec::new(),
             shown_meeting: None,
         }
     }
 
-    // New elements land at the end of their parent, which is where they
-    // belong, and later ones in a list keep their order, so sending only the
-    // ones that changed is enough whatever shifts the id numbering.
-    fn replace(out: &mut Outbox, shown: &mut Vec<Element>, new: Vec<Element>) {
-        for e in &new {
-            if !shown.contains(e) {
-                out.element(e.clone());
-            }
-        }
-        for e in shown.iter() {
-            if !new.iter().any(|n| n.id == e.id) {
-                out.remove(e.id.as_str());
-            }
-        }
+    /// Turns the children of `mount` from `shown` into `new`, sending only
+    /// the difference.
+    fn replace(out: &mut Outbox, mount: &str, shown: &mut Vec<Node>, new: Vec<Node>) {
+        out.extend(vtree::diff_into(Some(mount), shown, &new));
         *shown = new;
     }
 
@@ -193,17 +186,15 @@ impl Meet {
         });
         let buttons = meetings
             .iter()
-            .enumerate()
-            .map(|(k, m)| {
+            .map(|m| {
                 let code = m.code.0.as_str();
-                ui::button(format!("mine_{k}"))
-                    .parent("mine_list")
+                vtree::button(format!("mine_{code}"))
                     .label(format!("{} ({code})", m.name))
                     .on_press(Handler::action("open").payload(code))
             })
             .collect();
         out.signal(json!({"has_mine": !meetings.is_empty()}));
-        Self::replace(out, &mut self.mine, buttons);
+        Self::replace(out, "mine_list", &mut self.mine, buttons);
     }
 
     /// Opens a meeting in this session.
@@ -239,24 +230,16 @@ impl Meet {
             json!({"view": "meeting", "answer": answer, "feedback": {"kind": "info", "text": ""}}),
         );
 
-        let mut elements = Vec::new();
-        for (k, label) in m.options.iter().enumerate() {
-            elements.push(
-                ui::checkbox(format!("opt_{k}"))
-                    .parent("answer_card")
-                    .before("other")
-                    .label(label.as_str())
-                    .bind(format!("answer.o{k}"))
-                    .disabled(cel("s.meeting.closed")),
-            );
-            elements.push(
-                ui::text(format!("res_{k}"))
-                    .parent("results_card")
-                    .before("people")
-                    .text(cel(format!("s.results.o{k}"))),
-            );
-        }
-        Self::replace(out, &mut self.meeting, elements);
+        let choices = m.options.iter().enumerate().map(|(k, label)| {
+            vtree::checkbox(format!("opt_{k}"))
+                .label(label.as_str())
+                .bind(format!("answer.o{k}"))
+                .disabled(cel("s.meeting.closed"))
+        });
+        Self::replace(out, "opt_list", &mut self.choices, choices.collect());
+        let tallies = (0..m.options.len())
+            .map(|k| vtree::text(format!("res_{k}")).text(cel(format!("s.results.o{k}"))));
+        Self::replace(out, "res_list", &mut self.tallies, tallies.collect());
         remember(&self.db, &key, &code, None);
         self.show_mine(out, key);
         self.refresh(out, key);
@@ -265,8 +248,9 @@ impl Meet {
     /// Back to the start page.
     fn close_view(&mut self, out: &mut Outbox) {
         self.code = None;
-        Self::replace(out, &mut self.meeting, Vec::new());
-        Self::replace(out, &mut self.rows, Vec::new());
+        Self::replace(out, "opt_list", &mut self.choices, Vec::new());
+        Self::replace(out, "res_list", &mut self.tallies, Vec::new());
+        Self::replace(out, "people", &mut self.rows, Vec::new());
         self.shown_meeting = None;
     }
 
@@ -353,8 +337,7 @@ impl Meet {
         }
         let rows = answers
             .iter()
-            .enumerate()
-            .map(|(n, a)| {
+            .map(|a| {
                 let picked: Vec<&str> = m
                     .options
                     .iter()
@@ -374,10 +357,10 @@ impl Meet {
                 if !a.other.is_empty() {
                     line.push_str(&format!(" · also: {}", a.other));
                 }
-                ui::text(format!("ans_{n}")).parent("people").text(line)
+                vtree::text(format!("ans_{}", a.id.0)).text(line)
             })
             .collect();
-        Self::replace(out, &mut self.rows, rows);
+        Self::replace(out, "people", &mut self.rows, rows);
     }
 
     fn create(&mut self, out: &mut Outbox, key: PublicKey, action: &Action) {
@@ -703,6 +686,7 @@ impl App for Meet {
                 .bind("answer.name")
                 .disabled(cel("s.meeting.closed")),
         );
+        out.element(ui::column("opt_list").parent("answer_card").gap("medium"));
         out.element(
             ui::input("other")
                 .parent("answer_card")
@@ -731,6 +715,7 @@ impl App for Meet {
                 .visible(cel("s.results.best != ''"))
                 .text(cel("s.results.best")),
         );
+        out.element(ui::column("res_list").parent("results_card").gap("small"));
         out.element(
             ui::list("people")
                 .parent("results_card")
@@ -827,6 +812,7 @@ mod tests {
     use hyperb_core::identity::Identity;
     use hypereffect::RendererMessage;
     use hypereffect::client::Client;
+    use std::collections::BTreeSet;
 
     /// A renderer and a session, wired together the way `run_app` does.
     struct Loopback {
@@ -836,6 +822,17 @@ mod tests {
     }
 
     impl Loopback {
+        /// The text of the answer at place `n` of the list, from 0.
+        fn answer(&self, n: usize) -> Option<Value> {
+            self.client
+                .attr(&self.client.children(Some("people"))[n], "text")
+        }
+
+        /// The id of the first row of `list`.
+        fn first(&self, list: &str) -> String {
+            self.client.children(Some(list))[0].clone()
+        }
+
         fn receive(&mut self, line: &str) -> String {
             match RendererMessage::parse(line.trim_end()) {
                 Ok(RendererMessage::Hello { params }) => self.app.hello(&mut self.out, &params),
@@ -878,8 +875,8 @@ mod tests {
         }
     }
 
-    /// The ids of the elements that a batch sends, in order.
-    fn sent_ids(batch: &str) -> Vec<&str> {
+    /// The ids of the elements that a batch sends.
+    fn sent_ids(batch: &str) -> BTreeSet<&str> {
         batch
             .lines()
             .filter_map(|l| {
@@ -890,7 +887,7 @@ mod tests {
     }
 
     /// The ids of the elements that a batch takes away.
-    fn removed_ids(batch: &str) -> Vec<&str> {
+    fn removed_ids(batch: &str) -> BTreeSet<&str> {
         batch
             .lines()
             .filter_map(|l| {
@@ -964,7 +961,8 @@ mod tests {
         let put = ann.pull(ann_key);
         // The option lines re-render from the results signal; only the new
         // row is an element to send.
-        assert_eq!(sent_ids(&put), ["ans_0"], "{put}");
+        let row = ann.first("people");
+        assert_eq!(sent_ids(&put), BTreeSet::from([row.as_str()]), "{put}");
         assert!(removed_ids(&put).is_empty());
         assert_eq!(ann.pull(ann_key), "");
         for l in [&mut ann, &mut bob] {
@@ -1031,7 +1029,7 @@ mod tests {
             Some(json!("Tue 12:30: 1 available — Bob"))
         );
         assert_eq!(
-            ann.client.attr("ans_0", "text"),
+            ann.answer(0),
             Some(json!("Bob — Tue 12:30, Thu 13:00 · also: Fri morning"))
         );
         ann.write("answer.name", json!("Ann"));
@@ -1043,12 +1041,12 @@ mod tests {
             Some(json!("Best so far: Tue 12:30 (2 of 2 answered)"))
         );
         assert_eq!(
-            ann.client.attr("ans_1", "text"),
+            ann.answer(1),
             Some(json!("Ann (you) — Mon 12:00, Tue 12:30"))
         );
         bob.tick(0.0);
         assert_eq!(
-            bob.client.attr("ans_1", "text"),
+            bob.answer(1),
             Some(json!("Ann (organizer) — Mon 12:00, Tue 12:30"))
         );
         assert_eq!(
@@ -1114,10 +1112,10 @@ mod tests {
         assert_eq!(bob.client.value("form.name"), Some(&json!("Bob")));
         assert_eq!(bob.client.attr("mine", "visible"), Some(json!(true)));
         assert_eq!(
-            bob.client.attr("mine_0", "label"),
+            bob.client.attr(&bob.first("mine_list"), "label"),
             Some(json!(format!("Team lunch ({code})")))
         );
-        assert!(bob.trigger("mine_0", "onPress"));
+        assert!(bob.trigger(&bob.first("mine_list"), "onPress"));
         assert_eq!(bob.client.value("answer.name"), Some(&json!("Bob")));
         assert_eq!(bob.client.value("answer.o0"), Some(&json!(true)));
         assert_eq!(bob.client.value("answer.o1"), Some(&json!(false)));
@@ -1160,10 +1158,10 @@ mod tests {
         let mut ann = connect(&db, ann_key);
         assert_eq!(ann.client.value("form.name"), Some(&json!("Ann")));
         assert_eq!(
-            ann.client.attr("mine_0", "label"),
+            ann.client.attr(&ann.first("mine_list"), "label"),
             Some(json!(format!("Team lunch ({code})")))
         );
-        assert!(ann.trigger("mine_0", "onPress"));
+        assert!(ann.trigger(&ann.first("mine_list"), "onPress"));
         assert_eq!(ann.client.value("answer.o2"), Some(&json!(true)));
         assert_eq!(
             ann.client.attr("res_2", "text"),

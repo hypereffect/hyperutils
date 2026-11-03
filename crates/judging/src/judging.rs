@@ -22,7 +22,8 @@ use crate::store::{
     Scale, WriteTx,
 };
 use hyperb_core::identity::PublicKey;
-use hypereffect::{Action, App, Element, Handler, Metadata, Outbox, Value, cel, json, ui};
+use hypereffect::vtree::{self, Node};
+use hypereffect::{Action, App, Handler, Metadata, Outbox, Value, cel, json, ui};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -182,46 +183,39 @@ pub fn leaderboard(c: &Contest) -> Vec<Line> {
 /// top. Pressing an entry shows its scores, and pressing it again hides them;
 /// that happens in the renderer, under `_open.e<entry>`, which follows the
 /// entry when the order changes and is never sent back.
-fn board_items(c: &Contest) -> Vec<Element> {
-    let mut elements = Vec::new();
-    for (k, l) in leaderboard(c).iter().enumerate() {
-        let item = format!("b{k}");
-        let top = format!("{item}_top");
+fn board_items(c: &Contest) -> Vec<Node> {
+    let item = |l: &Line| {
+        let item = format!("b{}", l.entry);
         let open = format!("s._open.e{}", l.entry);
         let name = &c.entries[l.entry as usize];
-        elements.push(ui::column(&item).parent("board").gap("none"));
-        elements.push(ui::row(&top).parent(&item).justify("between"));
-        elements.push(
-            ui::button(format!("{item}_entry"))
-                .parent(&top)
-                .variant("plain")
-                .label(match l.position {
-                    Some(p) => format!("{p}. {name}"),
-                    None => format!("– {name}"),
-                })
-                .on_press(Handler::patch(
-                    json!({"_open": {format!("e{}", l.entry): cel(format!("!{open}"))}}),
-                )),
-        );
-        elements.push(
-            ui::badge(format!("{item}_avg"))
-                .parent(&top)
-                .variant(match l.position {
-                    Some(1) => "success",
-                    Some(_) => "info",
-                    None => "neutral",
-                })
-                .text(l.average().unwrap_or_else(|| "No scores".to_owned())),
-        );
-        elements.push(
-            ui::text(format!("{item}_scores"))
-                .parent(&item)
+        let top = vtree::row(format!("{item}_top"))
+            .justify("between")
+            .children([
+                vtree::button(format!("{item}_entry"))
+                    .variant("plain")
+                    .label(match l.position {
+                        Some(p) => format!("{p}. {name}"),
+                        None => format!("– {name}"),
+                    })
+                    .on_press(Handler::patch(
+                        json!({"_open": {format!("e{}", l.entry): cel(format!("!{open}"))}}),
+                    )),
+                vtree::badge(format!("{item}_avg"))
+                    .variant(match l.position {
+                        Some(1) => "success",
+                        Some(_) => "info",
+                        None => "neutral",
+                    })
+                    .text(l.average().unwrap_or_else(|| "No scores".to_owned())),
+            ]);
+        vtree::column(&item).gap("none").child(top).child(
+            vtree::text(format!("{item}_scores"))
                 .variant("caption")
                 .visible(cel(open))
                 .text(l.detail()),
-        );
-    }
-    elements
+        )
+    };
+    leaderboard(c).iter().map(item).collect()
 }
 
 /// Where the address points.
@@ -418,11 +412,11 @@ pub struct Contests {
     shown: Option<Vec<Option<u32>>>,
     /// Whether the signals that show and hide the scores are set up.
     toggles: bool,
-    /// The elements sent last, so that a refresh re-sends only what changed.
-    mine: Vec<Element>,
-    board: Vec<Element>,
-    sheet: Vec<Element>,
-    judges: Vec<Element>,
+    /// The trees sent last, so that a refresh re-sends only what changed.
+    mine: Vec<Node>,
+    board: Vec<Node>,
+    sheet: Vec<Node>,
+    judges: Vec<Node>,
     /// The `c` signal last shown, so that an unchanged contest stays silent.
     shown_c: Option<Value>,
 }
@@ -456,28 +450,18 @@ impl Contests {
         format!("{}/{id}", self.origin)
     }
 
-    // New elements land at the end of their parent, which is where they
-    // belong, and later ones in a list keep their order, so sending only the
-    // ones that changed is enough whatever shifts the id numbering.
-    fn replace(out: &mut Outbox, shown: &mut Vec<Element>, new: Vec<Element>) {
-        for e in &new {
-            if !shown.contains(e) {
-                out.element(e.clone());
-            }
-        }
-        for e in shown.iter() {
-            if !new.iter().any(|n| n.id == e.id) {
-                out.remove(e.id.as_str());
-            }
-        }
+    /// Turns the children of `mount` from `shown` into `new`, sending only
+    /// the difference.
+    fn replace(out: &mut Outbox, mount: &str, shown: &mut Vec<Node>, new: Vec<Node>) {
+        out.extend(vtree::diff_into(Some(mount), shown, &new));
         *shown = new;
     }
 
     /// Switches to `view`, dropping what belonged to the one before.
     fn show(&mut self, out: &mut Outbox, view: View) {
-        Self::replace(out, &mut self.board, Vec::new());
-        Self::replace(out, &mut self.sheet, Vec::new());
-        Self::replace(out, &mut self.judges, Vec::new());
+        Self::replace(out, "board", &mut self.board, Vec::new());
+        Self::replace(out, "sheet_list", &mut self.sheet, Vec::new());
+        Self::replace(out, "judge_list", &mut self.judges, Vec::new());
         self.open = None;
         self.role = Role::Viewer;
         self.shown = None;
@@ -505,10 +489,8 @@ impl Contests {
         });
         let buttons = mine
             .iter()
-            .enumerate()
-            .map(|(k, c)| {
-                ui::button(format!("mine_{k}"))
-                    .parent("mine_list")
+            .map(|c| {
+                vtree::button(format!("mine_{}", c.id.0))
                     .label(format!(
                         "{} · {} entries · {} judges · {}",
                         c.name,
@@ -520,7 +502,7 @@ impl Contests {
             })
             .collect();
         out.signal(json!({"has_mine": !mine.is_empty()}));
-        Self::replace(out, &mut self.mine, buttons);
+        Self::replace(out, "mine_list", &mut self.mine, buttons);
     }
 
     fn missing(&mut self, out: &mut Outbox) {
@@ -695,48 +677,42 @@ impl Contests {
                     .iter()
                     .enumerate()
                     .map(|(k, entry)| {
-                        ui::input(format!("e{k}_in"))
-                            .parent("sheet_list")
+                        vtree::input(format!("e{k}_in"))
                             .label(entry.as_str())
                             .variant("number")
                             .bind(format!("score.e{k}"))
                     })
                     .collect();
-                Self::replace(out, &mut self.sheet, sheet);
+                Self::replace(out, "sheet_list", &mut self.sheet, sheet);
             }
         }
 
         if self.role == Role::Organizer {
-            let mut elements = Vec::new();
+            let mut items = Vec::new();
             for (k, j) in c.judges.iter().enumerate() {
                 let item = format!("j{k}");
-                let top = format!("{item}_top");
                 let done = given(&j.scores);
-                elements.push(ui::column(&item).parent("judge_list").gap("none"));
-                elements.push(ui::row(&top).parent(&item).justify("between"));
-                elements.push(
-                    ui::text(format!("{item}_name"))
-                        .parent(&top)
-                        .text(j.name.as_str()),
-                );
-                elements.push(
-                    ui::badge(format!("{item}_done"))
-                        .parent(&top)
-                        .variant(if done == c.entries.len() {
-                            "success"
-                        } else {
-                            "neutral"
-                        })
-                        .text(format!("{done} of {} scored", c.entries.len())),
-                );
-                elements.push(
-                    ui::text(format!("{item}_link"))
-                        .parent(&item)
-                        .variant("code")
-                        .text(self.link(&j.link)),
+                let top = vtree::row(format!("{item}_top"))
+                    .justify("between")
+                    .children([
+                        vtree::text(format!("{item}_name")).text(j.name.as_str()),
+                        vtree::badge(format!("{item}_done"))
+                            .variant(if done == c.entries.len() {
+                                "success"
+                            } else {
+                                "neutral"
+                            })
+                            .text(format!("{done} of {} scored", c.entries.len())),
+                    ]);
+                items.push(
+                    vtree::column(&item).gap("none").child(top).child(
+                        vtree::text(format!("{item}_link"))
+                            .variant("code")
+                            .text(self.link(&j.link)),
+                    ),
                 );
             }
-            Self::replace(out, &mut self.judges, elements);
+            Self::replace(out, "judge_list", &mut self.judges, items);
         }
 
         if c.revealed || self.role == Role::Organizer {
@@ -750,9 +726,9 @@ impl Contests {
                 out.signal(json!({ "_open": closed }));
                 self.toggles = true;
             }
-            Self::replace(out, &mut self.board, board_items(c));
+            Self::replace(out, "board", &mut self.board, board_items(c));
         } else {
-            Self::replace(out, &mut self.board, Vec::new());
+            Self::replace(out, "board", &mut self.board, Vec::new());
         }
     }
 

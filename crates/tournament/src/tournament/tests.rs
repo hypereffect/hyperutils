@@ -12,6 +12,16 @@ struct Loopback {
 }
 
 impl Loopback {
+    /// The id of the row of the standings at place `n`, from 0.
+    fn rank(&self, n: usize) -> String {
+        self.client.children(Some("table"))[n].clone()
+    }
+
+    /// The id of the first row of `list`.
+    fn first(&self, list: &str) -> String {
+        self.client.children(Some(list))[0].clone()
+    }
+
     fn receive(&mut self, line: &str) -> String {
         match RendererMessage::parse(line.trim_end()) {
             Ok(RendererMessage::Hello { params }) => self.app.hello(&mut self.out, &params),
@@ -120,8 +130,8 @@ fn id_of(link: &str) -> String {
         .to_owned()
 }
 
-/// The ids of the elements that a batch sends, in order.
-fn sent_ids(batch: &str) -> Vec<&str> {
+/// The ids of the elements that a batch sends.
+fn sent_ids(batch: &str) -> BTreeSet<&str> {
     batch
         .lines()
         .filter_map(|l| {
@@ -132,7 +142,7 @@ fn sent_ids(batch: &str) -> Vec<&str> {
 }
 
 /// The ids of the elements that a batch takes away.
-fn removed_ids(batch: &str) -> Vec<&str> {
+fn removed_ids(batch: &str) -> BTreeSet<&str> {
     batch
         .lines()
         .filter_map(|l| {
@@ -378,24 +388,26 @@ fn results_entered_on_one_link_show_on_the_other() {
     // Cy sees it on the next tick.
     cy.tick();
     assert_eq!(cy.text("g0"), format!("{home}  2 – 1  {away}"));
-    assert_eq!(cy.label("s0_team"), format!("1. {home}"));
-    assert_eq!(cy.text("s0_pts"), "3 pts");
+    let (winner, loser) = (cy.rank(0), cy.rank(3));
+    assert_eq!(cy.label(&format!("{winner}_team")), format!("1. {home}"));
+    assert_eq!(cy.text(&format!("{winner}_pts")), "3 pts");
     assert_eq!(
-        cy.text("s0_stats"),
+        cy.text(&format!("{winner}_stats")),
         "Played 1 · W 1 · D 0 · L 0 · Goals 2–1 (+1)"
     );
-    assert_eq!(cy.label("s3_team"), format!("4. {away}"));
-    assert!(!cy.client.contains("s4"));
+    assert_eq!(cy.label(&format!("{loser}_team")), format!("4. {away}"));
+    assert_eq!(cy.client.children(Some("table")).len(), 4);
     // The records are hidden until a team is pressed, and pressing it
     // again hides it.
-    assert!(!cy.visible("s0_stats") && !cy.visible("s3_stats"));
-    cy.toggle("s0_team");
-    assert!(cy.visible("s0_stats") && !cy.visible("s1_stats"));
-    cy.toggle("s0_team");
-    assert!(!cy.visible("s0_stats"));
+    assert!(!cy.visible(&format!("{winner}_stats")) && !cy.visible(&format!("{loser}_stats")));
+    cy.toggle(&format!("{winner}_team"));
+    assert!(cy.visible(&format!("{winner}_stats")));
+    assert!(!cy.visible(&format!("{}_stats", cy.rank(1))));
+    cy.toggle(&format!("{winner}_team"));
+    assert!(!cy.visible(&format!("{winner}_stats")));
     // An open record stays with its team when the order changes.
-    cy.toggle("s3_team");
-    assert!(cy.visible("s3_stats"));
+    cy.toggle(&format!("{loser}_team"));
+    assert!(cy.visible(&format!("{loser}_stats")));
 
     // Ann corrects it to a draw and makes a draw worth two.
     ann.tick();
@@ -413,22 +425,22 @@ fn results_entered_on_one_link_show_on_the_other() {
     // Both drew 1–1 and share first; the two who have not played share
     // third.
     for k in 0..2 {
-        assert!(cy.label(&format!("s{k}_team")).starts_with("1. "));
-        assert_eq!(cy.text(&format!("s{k}_pts")), "2 pts");
+        assert!(cy.label(&format!("{}_team", cy.rank(k))).starts_with("1. "));
+        assert_eq!(cy.text(&format!("{}_pts", cy.rank(k))), "2 pts");
     }
-    assert!(cy.label("s2_team").starts_with("3. "));
-    let at = (0..4)
-        .find(|k| cy.label(&format!("s{k}_team")).ends_with(away.as_str()))
-        .unwrap();
-    assert!(cy.visible(&format!("s{at}_stats")));
+    assert!(cy.label(&format!("{}_team", cy.rank(2))).starts_with("3. "));
+    // The away team moved up with its row, which is still the open one.
+    assert!([cy.rank(0), cy.rank(1)].contains(&loser));
+    assert!(cy.label(&format!("{loser}_team")).ends_with(away.as_str()));
+    assert!(cy.visible(&format!("{loser}_stats")));
     assert_eq!(
         (0..4)
-            .filter(|k| cy.visible(&format!("s{k}_stats")))
+            .filter(|&k| cy.visible(&format!("{}_stats", cy.rank(k))))
             .count(),
         1
     );
-    assert_eq!(cy.text("s2_pts"), "0 pts");
-    assert!(cy.label("s3_team").starts_with("3. "));
+    assert_eq!(cy.text(&format!("{}_pts", cy.rank(2))), "0 pts");
+    assert!(cy.label(&format!("{}_team", cy.rank(3))).starts_with("3. "));
     // Bob's inputs follow, since he was not changing that game.
     bob.tick();
     assert_eq!(bob.client.value("score.g0.h"), Some(&json!(1)));
@@ -481,10 +493,10 @@ fn the_creator_finds_and_deletes_it() {
     let mut ann = connect(&db, ann_key, "/");
     assert!(ann.visible("mine"));
     assert_eq!(
-        ann.client.attr("mine_0", "label"),
+        ann.client.attr(&ann.first("mine_list"), "label"),
         Some(json!("Park league · 4 teams · 0 of 6 games played"))
     );
-    ann.press("mine_0");
+    ann.press(&ann.first("mine_list"));
     assert_eq!(id_of(&ann.text("edit_link")), edit);
     let mut cy = connect(&db, person(), &format!("/{view}"));
     // The view link does not offer deleting, even to the creator.
@@ -512,26 +524,54 @@ fn the_creator_finds_and_deletes_it() {
 /// The standings as the elements a save has to re-send: the rows whose
 /// order, points or records changed, in the order they are sent, plus the
 /// parts of the game that was played.
+/// What saving `game` changes in the standings rows, each row being its
+/// team's: the texts and badges that differ, and the rows themselves when
+/// the order changed, since some of them have to move.
 fn changed_standings(before: &Tournament, after: &Tournament, game: usize) -> Vec<String> {
     let (a, b) = (standings(before), standings(after));
     let mut want = Vec::new();
-    for k in 0..b.len() {
-        let (x, y) = (&a[k], &b[k]);
-        if (x.position, x.team) != (y.position, y.team) {
-            want.push(format!("s{k}_team"));
+    for y in &b {
+        let x = a.iter().find(|x| x.team == y.team).unwrap();
+        let row = format!("s{}", y.team);
+        if x.position != y.position {
+            want.push(format!("{row}_team"));
         }
         if x.points != y.points || (x.played > 0 && x.position == 1) != (y.played > 0 && y.position == 1) {
-            want.push(format!("s{k}_pts"));
+            want.push(format!("{row}_pts"));
         }
-        if (x.played, x.won, x.drawn, x.lost, x.scored, x.conceded, x.team)
-            != (y.played, y.won, y.drawn, y.lost, y.scored, y.conceded, y.team)
+        if (x.played, x.won, x.drawn, x.lost, x.scored, x.conceded)
+            != (y.played, y.won, y.drawn, y.lost, y.scored, y.conceded)
         {
-            want.push(format!("s{k}_stats"));
+            want.push(format!("{row}_stats"));
         }
     }
     want.push(format!("g{game}_save"));
     want.push(format!("g{game}_done"));
     want
+}
+
+/// The standings rows, in order, that `after` puts on screen.
+fn order(after: &Tournament) -> Vec<String> {
+    standings(after)
+        .iter()
+        .map(|l| format!("s{}", l.team))
+        .collect()
+}
+
+/// Checks a batch against [`changed_standings`]: the rows it sends are moves,
+/// which only happen when the order changed, and the client ends up with the
+/// order of `after`.
+fn check_standings(l: &Loopback, put: &str, before: &Tournament, after: &Tournament, game: usize) {
+    let list = changed_standings(before, after, game);
+    let want: BTreeSet<&str> = list.iter().map(String::as_str).collect();
+    let (rows, rest): (BTreeSet<&str>, BTreeSet<&str>) =
+        sent_ids(put).into_iter().partition(|id| {
+            id.strip_prefix('s')
+                .is_some_and(|n| n.parse::<u32>().is_ok())
+        });
+    assert_eq!(rest, want, "{put}");
+    assert!(rows.is_empty() || order(before) != order(after), "{put}");
+    assert_eq!(l.client.children(Some("table")), order(after));
 }
 
 #[test]
@@ -545,9 +585,7 @@ fn bringing_the_tournament_up_to_date_sends_only_what_changed() {
     bob.write("score.g0.a", json!(1));
     let put = bob.press("g0_save");
     let after = db.tournaments().all().unwrap().remove(0);
-    let list = changed_standings(&before, &after, 0);
-    let want: Vec<&str> = list.iter().map(String::as_str).collect();
-    assert_eq!(sent_ids(&put), want);
+    check_standings(&bob, &put, &before, &after, 0);
     assert!(removed_ids(&put).is_empty());
     // Again without any change: nothing goes over the wire.
     assert_eq!(bob.refresh(), "");
@@ -558,9 +596,7 @@ fn bringing_the_tournament_up_to_date_sends_only_what_changed() {
     let put = bob.press("g1_save");
     let shown = after;
     let after = db.tournaments().all().unwrap().remove(0);
-    let list = changed_standings(&shown, &after, 1);
-    let want: Vec<&str> = list.iter().map(String::as_str).collect();
-    assert_eq!(sent_ids(&put), want, "{put}");
+    check_standings(&bob, &put, &shown, &after, 1);
     bob.clean();
 }
 

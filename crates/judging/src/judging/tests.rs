@@ -2,6 +2,7 @@ use super::*;
 use hyperb_core::identity::Identity;
 use hypereffect::RendererMessage;
 use hypereffect::client::Client;
+use std::collections::BTreeSet;
 
 /// A renderer and a session, wired together the way `run_app` does.
 struct Loopback {
@@ -11,6 +12,11 @@ struct Loopback {
 }
 
 impl Loopback {
+    /// The id of the first row of `list`.
+    fn first(&self, list: &str) -> String {
+        self.client.children(Some(list))[0].clone()
+    }
+
     fn receive(&mut self, line: &str) -> String {
         match RendererMessage::parse(line.trim_end()) {
             Ok(RendererMessage::Hello { params }) => self.app.hello(&mut self.out, &params),
@@ -128,8 +134,8 @@ fn id_of(link: &str) -> String {
         .to_owned()
 }
 
-/// The ids of the elements that a batch sends, in order.
-fn sent_ids(batch: &str) -> Vec<&str> {
+/// The ids of the elements that a batch sends.
+fn sent_ids(batch: &str) -> BTreeSet<&str> {
     batch
         .lines()
         .filter_map(|l| {
@@ -140,7 +146,7 @@ fn sent_ids(batch: &str) -> Vec<&str> {
 }
 
 /// The ids of the elements that a batch takes away.
-fn removed_ids(batch: &str) -> Vec<&str> {
+fn removed_ids(batch: &str) -> BTreeSet<&str> {
     batch
         .lines()
         .filter_map(|l| {
@@ -384,6 +390,8 @@ fn judges_score_privately_and_the_leaderboard_appears_when_revealed() {
     assert_eq!(olga.text("j3_done"), "2 of 3 scored");
     assert_eq!(olga.text("j1_done"), "3 of 3 scored");
     // Lemon tart 7 8 9 10 → 8.5; Carrot cake 5 6 6 8 → 6; Scones 2 3 → 2.5.
+    // Each row is named after its entry, and the board is in their order.
+    assert_eq!(olga.client.children(Some("board")), ["b0", "b1", "b2"]);
     assert_eq!(olga.label("b0_entry"), "1. Lemon tart");
     assert_eq!(olga.text("b0_avg"), "8.5");
     assert_eq!(olga.label("b1_entry"), "2. Carrot cake");
@@ -471,10 +479,10 @@ fn the_creator_finds_and_deletes_it() {
     let mut olga = connect(&db, olga_key, "/");
     assert!(olga.visible("mine"));
     assert_eq!(
-        olga.label("mine_0"),
+        olga.label(&olga.first("mine_list")),
         "Bake-off · 3 entries · 4 judges · scoring"
     );
-    olga.press("mine_0");
+    olga.press(&olga.first("mine_list"));
     assert!(olga.visible("judges") && olga.visible("delete_btn"));
     let mut ann = connect(&db, person(), &format!("/{}", judges[0]));
     // Only the creator deletes, even with the organizer's link.

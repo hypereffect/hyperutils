@@ -13,10 +13,11 @@
 //! edits show up within a couple of seconds.
 
 use crate::store::{
-    self, Answer, Db, Field, Form, FormId, Kind, Owner, OwnerKey, Response, WriteTx,
+    self, Answer, Db, Field, Form, FormId, Kind, Owner, OwnerKey, Response, ResponseId, WriteTx,
 };
 use hyperb_core::identity::PublicKey;
-use hypereffect::{Action, App, Element, Handler, Map, Metadata, Outbox, Value, cel, json, ui};
+use hypereffect::vtree::{self, Node};
+use hypereffect::{Action, App, Handler, Map, Metadata, Outbox, Value, cel, json, ui};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -193,11 +194,11 @@ pub struct Forms {
     /// The shape of the answer signal set up for each field on screen, so
     /// that an edit only resets the answers it has to.
     answer_shapes: HashMap<u32, (Kind, Vec<String>)>,
-    /// The elements sent last, so that a refresh re-sends only what changed.
-    mine: Vec<Element>,
-    editor: Vec<Element>,
-    fill: Vec<Element>,
-    result: Vec<Element>,
+    /// The trees sent last, so that a refresh re-sends only what changed.
+    mine: Vec<Node>,
+    editor: Vec<Node>,
+    fill: Vec<Node>,
+    result: Vec<Node>,
     /// The `form` signal last shown, so that an unchanged form stays silent.
     shown_form: Option<Value>,
 }
@@ -228,34 +229,24 @@ impl Forms {
         self.viewer.to_string()
     }
 
-    // New elements land at the end of their parent, which is where they
-    // belong, and later ones in a list keep their order, so sending only the
-    // ones that changed is enough whatever shifts the id numbering.
-    fn replace(out: &mut Outbox, shown: &mut Vec<Element>, new: Vec<Element>) {
-        for e in &new {
-            if !shown.contains(e) {
-                out.element(e.clone());
-            }
-        }
-        for e in shown.iter() {
-            if !new.iter().any(|n| n.id == e.id) {
-                out.remove(e.id.as_str());
-            }
-        }
+    /// Turns the children of `mount` from `shown` into `new`, sending only
+    /// the difference.
+    fn replace(out: &mut Outbox, mount: &str, shown: &mut Vec<Node>, new: Vec<Node>) {
+        out.extend(vtree::diff_into(Some(mount), shown, &new));
         *shown = new;
     }
 
     /// Switches to `view`, dropping what belonged to the one before.
     fn show(&mut self, out: &mut Outbox, view: View) {
         if view != View::Edit {
-            Self::replace(out, &mut self.editor, Vec::new());
+            Self::replace(out, "draft_fields", &mut self.editor, Vec::new());
         }
         if view != View::Fill {
-            Self::replace(out, &mut self.fill, Vec::new());
+            Self::replace(out, "fill_fields", &mut self.fill, Vec::new());
             self.answer_shapes.clear();
         }
         if view != View::Results {
-            Self::replace(out, &mut self.result, Vec::new());
+            Self::replace(out, "result_fields", &mut self.result, Vec::new());
         }
         self.shown_form = None;
         if !matches!(view, View::Fill | View::Results) {
@@ -288,10 +279,8 @@ impl Forms {
         });
         let buttons = forms
             .iter()
-            .enumerate()
-            .map(|(k, (f, n))| {
-                ui::button(format!("mine_{k}"))
-                    .parent("mine_list")
+            .map(|(f, n)| {
+                vtree::button(format!("mine_{}", f.id.0))
                     .label(format!(
                         "{} · {n} response{} · {} left",
                         f.title,
@@ -302,7 +291,7 @@ impl Forms {
             })
             .collect();
         out.signal(json!({"has_mine": !forms.is_empty()}));
-        Self::replace(out, &mut self.mine, buttons);
+        Self::replace(out, "mine_list", &mut self.mine, buttons);
     }
 
     fn missing(&mut self, out: &mut Outbox) {
@@ -379,72 +368,54 @@ impl Forms {
             .map(|k| json!({"value": k.name(), "label": k.label()}))
             .collect();
         let last = self.draft.len().saturating_sub(1);
-        let mut elements = Vec::new();
+        let mut cards = Vec::new();
         for (pos, &id) in self.draft.iter().enumerate() {
             let (card, sig) = (format!("d{id}"), format!("draft.fields.f{id}"));
-            elements.push(
-                ui::card(&card)
-                    .parent("draft_fields")
-                    .title(format!("Question {}", pos + 1))
-                    .gap("small"),
-            );
-            elements.push(
-                ui::input(format!("{card}_label"))
-                    .parent(&card)
-                    .label("Question")
-                    .bind(format!("{sig}.label")),
-            );
-            elements.push(
-                ui::select(format!("{card}_kind"))
-                    .parent(&card)
-                    .label("Type")
-                    .options(kinds.clone())
-                    .bind(format!("{sig}.kind")),
-            );
             let s = format!("s.{sig}.kind");
-            elements.push(
-                ui::input(format!("{card}_options"))
-                    .parent(&card)
-                    .label("Options, one per line")
-                    .variant("multiline")
-                    .bind(format!("{sig}.options"))
-                    .visible(cel(format!(
-                        "{s} == 'choice' || {s} == 'dropdown' || {s} == 'checkboxes'"
-                    ))),
-            );
-            elements.push(
-                ui::checkbox(format!("{card}_required"))
-                    .parent(&card)
-                    .label("Required")
-                    .variant("switch")
-                    .bind(format!("{sig}.required")),
-            );
-            elements.push(ui::row(format!("{card}_bar")).parent(&card).wrap(true));
-            elements.push(
-                ui::button(format!("{card}_up"))
-                    .parent(format!("{card}_bar"))
+            let bar = vtree::row(format!("{card}_bar")).wrap(true).children([
+                vtree::button(format!("{card}_up"))
                     .label("↑ Up")
                     .variant("plain")
                     .disabled(pos == 0)
                     .on_press(Handler::action("up").payload(id)),
-            );
-            elements.push(
-                ui::button(format!("{card}_down"))
-                    .parent(format!("{card}_bar"))
+                vtree::button(format!("{card}_down"))
                     .label("↓ Down")
                     .variant("plain")
                     .disabled(pos == last)
                     .on_press(Handler::action("down").payload(id)),
-            );
-            elements.push(
-                ui::button(format!("{card}_remove"))
-                    .parent(format!("{card}_bar"))
+                vtree::button(format!("{card}_remove"))
                     .label("Remove")
                     .variant("plain")
                     .on_press(Handler::action("remove").payload(id)),
+            ]);
+            cards.push(
+                vtree::card(&card)
+                    .title(format!("Question {}", pos + 1))
+                    .gap("small")
+                    .children([
+                        vtree::input(format!("{card}_label"))
+                            .label("Question")
+                            .bind(format!("{sig}.label")),
+                        vtree::select(format!("{card}_kind"))
+                            .label("Type")
+                            .options(kinds.clone())
+                            .bind(format!("{sig}.kind")),
+                        vtree::input(format!("{card}_options"))
+                            .label("Options, one per line")
+                            .variant("multiline")
+                            .bind(format!("{sig}.options"))
+                            .visible(cel(format!(
+                                "{s} == 'choice' || {s} == 'dropdown' || {s} == 'checkboxes'"
+                            ))),
+                        vtree::checkbox(format!("{card}_required"))
+                            .label("Required")
+                            .variant("switch")
+                            .bind(format!("{sig}.required")),
+                        bar,
+                    ]),
             );
         }
-        Self::replace(out, &mut self.editor, elements);
+        Self::replace(out, "draft_fields", &mut self.editor, cards);
     }
 
     /// Moves, adds or removes a question of the editor.
@@ -696,7 +667,7 @@ impl Forms {
         if !answers.is_empty() {
             out.signal(json!({ "answer": answers }));
         }
-        let mut elements = Vec::new();
+        let mut cards = Vec::new();
         for field in &f.fields {
             let (card, sig) = (format!("q{}", field.id), format!("answer.f{}", field.id));
             let title = if field.required {
@@ -704,32 +675,19 @@ impl Forms {
             } else {
                 field.label.clone()
             };
-            elements.push(
-                ui::card(&card)
-                    .parent("fill_fields")
-                    .title(title)
-                    .gap("small"),
-            );
+            let node = vtree::card(&card).title(title).gap("small");
             let options: Vec<Value> = field
                 .options
                 .iter()
                 .map(|o| json!({"value": o, "label": o}))
                 .collect();
             let input = format!("{card}_in");
-            match field.kind {
-                Kind::Text => elements.push(ui::input(input).parent(&card).bind(sig)),
-                Kind::Paragraph => elements.push(
-                    ui::input(input)
-                        .parent(&card)
-                        .variant("multiline")
-                        .bind(sig),
-                ),
-                Kind::Number => {
-                    elements.push(ui::input(input).parent(&card).variant("number").bind(sig))
-                }
-                Kind::Choice | Kind::Dropdown => elements.push(
-                    ui::select(input)
-                        .parent(&card)
+            cards.push(match field.kind {
+                Kind::Text => node.child(vtree::input(input).bind(sig)),
+                Kind::Paragraph => node.child(vtree::input(input).variant("multiline").bind(sig)),
+                Kind::Number => node.child(vtree::input(input).variant("number").bind(sig)),
+                Kind::Choice | Kind::Dropdown => node.child(
+                    vtree::select(input)
                         .variant(if field.kind == Kind::Choice {
                             "radio"
                         } else {
@@ -739,18 +697,15 @@ impl Forms {
                         .bind(sig),
                 ),
                 Kind::Checkboxes => {
-                    for (k, o) in field.options.iter().enumerate() {
-                        elements.push(
-                            ui::checkbox(format!("{card}_o{k}"))
-                                .parent(&card)
-                                .label(o.as_str())
-                                .bind(format!("{sig}.o{k}")),
-                        );
-                    }
+                    node.children(field.options.iter().enumerate().map(|(k, o)| {
+                        vtree::checkbox(format!("{card}_o{k}"))
+                            .label(o.as_str())
+                            .bind(format!("{sig}.o{k}"))
+                    }))
                 }
-            }
+            });
         }
-        Self::replace(out, &mut self.fill, elements);
+        Self::replace(out, "fill_fields", &mut self.fill, cards);
     }
 
     fn submit(&mut self, out: &mut Outbox, action: &Action) {
@@ -833,81 +788,78 @@ impl Forms {
             self.shown_form = Some(shown_form);
         }
         if !(f.public || f.owner == me) {
-            return Self::replace(out, &mut self.result, Vec::new());
+            return Self::replace(out, "result_fields", &mut self.result, Vec::new());
         }
         responses.sort_by_key(|r| std::cmp::Reverse(r.at));
         let total = responses.len();
-        let mut elements = Vec::new();
+        let mut cards = Vec::new();
         for field in &f.fields {
             let card = format!("r{}", field.id);
-            let values: Vec<&Vec<String>> = responses
+            // Each with the response it comes from, which names its line.
+            let values: Vec<(&ResponseId, &Vec<String>)> = responses
                 .iter()
-                .filter_map(|r| r.answers.iter().find(|a| a.field == field.id))
-                .map(|a| &a.values)
-                .filter(|v| !v.is_empty())
+                .filter_map(|r| {
+                    let a = r.answers.iter().find(|a| a.field == field.id)?;
+                    Some((&r.id, &a.values))
+                })
+                .filter(|(_, v)| !v.is_empty())
                 .collect();
-            elements.push(
-                ui::card(&card)
-                    .parent("result_fields")
-                    .title(field.label.as_str())
-                    .gap("small"),
-            );
-            elements.push(
-                ui::text(format!("{card}_count"))
-                    .parent(&card)
-                    .variant("caption")
-                    .text(format!("{} of {total} answered", values.len())),
-            );
+            let mut node = vtree::card(&card)
+                .title(field.label.as_str())
+                .gap("small")
+                .child(
+                    vtree::text(format!("{card}_count"))
+                        .variant("caption")
+                        .text(format!("{} of {total} answered", values.len())),
+                );
             if field.kind.has_options() {
                 for (k, o) in field.options.iter().enumerate() {
-                    let n = values.iter().filter(|v| v.contains(o)).count();
+                    let n = values.iter().filter(|(_, v)| v.contains(o)).count();
                     let share = if total == 0 {
                         0.0
                     } else {
                         n as f64 / total as f64
                     };
-                    elements.push(
-                        ui::progress(format!("{card}_o{k}"))
-                            .parent(&card)
+                    node = node.child(
+                        vtree::progress(format!("{card}_o{k}"))
                             .label(format!("{o} — {n}"))
                             .value(share),
                     );
                 }
+                cards.push(node);
                 continue;
             }
             if field.kind == Kind::Number {
-                let nums: Vec<f64> = values.iter().filter_map(|v| v[0].parse().ok()).collect();
+                let nums: Vec<f64> = values
+                    .iter()
+                    .filter_map(|(_, v)| v[0].parse().ok())
+                    .collect();
                 if !nums.is_empty() {
                     let sum: f64 = nums.iter().sum();
                     let min = nums.iter().copied().fold(f64::INFINITY, f64::min);
                     let max = nums.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                    elements.push(
-                        ui::text(format!("{card}_stats"))
-                            .parent(&card)
-                            .text(format!(
-                                "Average {} · lowest {min} · highest {max}",
-                                (sum / nums.len() as f64 * 100.0).round() / 100.0
-                            )),
-                    );
+                    node = node.child(vtree::text(format!("{card}_stats")).text(format!(
+                        "Average {} · lowest {min} · highest {max}",
+                        (sum / nums.len() as f64 * 100.0).round() / 100.0
+                    )));
                 }
             }
-            for (n, v) in values.iter().take(MAX_SHOWN).enumerate() {
-                elements.push(
-                    ui::text(format!("{card}_{n}"))
-                        .parent(&card)
-                        .text(v[0].as_str()),
-                );
-            }
+            node = node.children(
+                values
+                    .iter()
+                    .take(MAX_SHOWN)
+                    .map(|(r, v)| vtree::text(format!("{card}_{}", r.0)).text(v[0].as_str())),
+            );
             if values.len() > MAX_SHOWN {
-                elements.push(
-                    ui::text(format!("{card}_more"))
-                        .parent(&card)
+                node = node.child(
+                    vtree::text(format!("{card}_more"))
                         .variant("caption")
                         .text(format!("…and {} more", values.len() - MAX_SHOWN)),
                 );
             }
+            cards.push(node);
         }
-        Self::replace(out, &mut self.result, elements);
+        Self::replace(out, "result_fields", &mut self.result, cards);
     }
 
     /// Opens the form the action names, in `view`.

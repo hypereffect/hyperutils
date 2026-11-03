@@ -16,7 +16,8 @@ use crate::store::{
     self, Db, EditId, EditLink, Game, Owner, OwnerKey, Points, Tournament, TournamentId, WriteTx,
 };
 use hyperb_core::identity::PublicKey;
-use hypereffect::{Action, App, Element, Handler, Metadata, Outbox, Value, cel, json, ui};
+use hypereffect::vtree::{self, Node};
+use hypereffect::{Action, App, Handler, Metadata, Outbox, Value, cel, json, ui};
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -177,55 +178,51 @@ pub fn standings(t: &Tournament) -> Vec<Line> {
 /// top. Pressing a team shows its record, and pressing it again hides it;
 /// that happens in the renderer, under `_open.t<team>`, which follows the team
 /// when the order changes and is never sent back.
-fn standing_items(t: &Tournament) -> Vec<Element> {
-    let mut elements = Vec::new();
-    for (k, l) in standings(t).iter().enumerate() {
-        let item = format!("s{k}");
-        let top = format!("{item}_top");
+fn standing_items(t: &Tournament) -> Vec<Node> {
+    let mut items = Vec::new();
+    for l in &standings(t) {
+        let item = format!("s{}", l.team);
         let open = format!("s._open.t{}", l.team);
-        elements.push(ui::column(&item).parent("table").gap("none"));
-        elements.push(ui::row(&top).parent(&item).justify("between"));
-        elements.push(
-            ui::button(format!("{item}_team"))
-                .parent(&top)
-                .variant("plain")
-                .label(format!("{}. {}", l.position, t.teams[l.team as usize]))
-                .on_press(Handler::patch(
-                    json!({"_open": {format!("t{}", l.team): cel(format!("!{open}"))}}),
-                )),
-        );
-        elements.push(
-            ui::badge(format!("{item}_pts"))
-                .parent(&top)
-                .variant(if l.position == 1 && l.played > 0 {
-                    "success"
-                } else {
-                    "info"
-                })
-                .text(format!(
-                    "{} pt{}",
-                    l.points,
-                    if l.points == 1 { "" } else { "s" }
-                )),
-        );
-        elements.push(
-            ui::text(format!("{item}_stats"))
-                .parent(&item)
-                .variant("caption")
-                .visible(cel(open))
-                .text(format!(
-                    "Played {} · W {} · D {} · L {} · Goals {}–{} ({:+})",
-                    l.played,
-                    l.won,
-                    l.drawn,
-                    l.lost,
-                    l.scored,
-                    l.conceded,
-                    l.difference()
-                )),
+        let top = vtree::row(format!("{item}_top"))
+            .justify("between")
+            .children([
+                vtree::button(format!("{item}_team"))
+                    .variant("plain")
+                    .label(format!("{}. {}", l.position, t.teams[l.team as usize]))
+                    .on_press(Handler::patch(
+                        json!({"_open": {format!("t{}", l.team): cel(format!("!{open}"))}}),
+                    )),
+                vtree::badge(format!("{item}_pts"))
+                    .variant(if l.position == 1 && l.played > 0 {
+                        "success"
+                    } else {
+                        "info"
+                    })
+                    .text(format!(
+                        "{} pt{}",
+                        l.points,
+                        if l.points == 1 { "" } else { "s" }
+                    )),
+            ]);
+        items.push(
+            vtree::column(&item).gap("none").child(top).child(
+                vtree::text(format!("{item}_stats"))
+                    .variant("caption")
+                    .visible(cel(open))
+                    .text(format!(
+                        "Played {} · W {} · D {} · L {} · Goals {}–{} ({:+})",
+                        l.played,
+                        l.won,
+                        l.drawn,
+                        l.lost,
+                        l.scored,
+                        l.conceded,
+                        l.difference()
+                    )),
+            ),
         );
     }
-    elements
+    items
 }
 
 /// Where the address points.
@@ -382,10 +379,10 @@ pub struct Tournaments {
     shown_points: Option<Points>,
     /// Whether the signals that show and hide the records are set up.
     toggles: bool,
-    /// The elements sent last, so that a refresh re-sends only what changed.
-    mine: Vec<Element>,
-    standings: Vec<Element>,
-    fixtures: Vec<Element>,
+    /// The trees sent last, so that a refresh re-sends only what changed.
+    mine: Vec<Node>,
+    standings: Vec<Node>,
+    fixtures: Vec<Node>,
     /// The `t` signal last shown, so that an unchanged tournament stays silent.
     shown_t: Option<Value>,
 }
@@ -415,27 +412,17 @@ impl Tournaments {
         self.viewer.to_string()
     }
 
-    // New elements land at the end of their parent, which is where they
-    // belong, and later ones in a list keep their order, so sending only the
-    // ones that changed is enough whatever shifts the id numbering.
-    fn replace(out: &mut Outbox, shown: &mut Vec<Element>, new: Vec<Element>) {
-        for e in &new {
-            if !shown.contains(e) {
-                out.element(e.clone());
-            }
-        }
-        for e in shown.iter() {
-            if !new.iter().any(|n| n.id == e.id) {
-                out.remove(e.id.as_str());
-            }
-        }
+    /// Turns the children of `mount` from `shown` into `new`, sending only
+    /// the difference.
+    fn replace(out: &mut Outbox, mount: &str, shown: &mut Vec<Node>, new: Vec<Node>) {
+        out.extend(vtree::diff_into(Some(mount), shown, &new));
         *shown = new;
     }
 
     /// Switches to `view`, dropping what belonged to the one before.
     fn show(&mut self, out: &mut Outbox, view: View) {
-        Self::replace(out, &mut self.standings, Vec::new());
-        Self::replace(out, &mut self.fixtures, Vec::new());
+        Self::replace(out, "table", &mut self.standings, Vec::new());
+        Self::replace(out, "fixtures", &mut self.fixtures, Vec::new());
         self.open = None;
         self.can_edit = false;
         self.shown.clear();
@@ -464,11 +451,9 @@ impl Tournaments {
         });
         let buttons = mine
             .iter()
-            .enumerate()
-            .map(|(k, t)| {
+            .map(|t| {
                 let played = t.games.iter().filter(|g| g.score.is_some()).count();
-                ui::button(format!("mine_{k}"))
-                    .parent("mine_list")
+                vtree::button(format!("mine_{}", t.id.0))
                     .label(format!(
                         "{} · {} teams · {played} of {} games played",
                         t.name,
@@ -479,7 +464,7 @@ impl Tournaments {
             })
             .collect();
         out.signal(json!({"has_mine": !mine.is_empty()}));
-        Self::replace(out, &mut self.mine, buttons);
+        Self::replace(out, "mine_list", &mut self.mine, buttons);
     }
 
     fn missing(&mut self, out: &mut Outbox) {
@@ -618,18 +603,15 @@ impl Tournaments {
             out.signal(json!({ "_open": closed }));
             self.toggles = true;
         }
-        Self::replace(out, &mut self.standings, standing_items(t));
+        Self::replace(out, "table", &mut self.standings, standing_items(t));
 
         let team = |i: u32| t.teams[i as usize].as_str();
-        let mut elements = Vec::new();
+        let mut cards = Vec::new();
         for round in 0..rounds(t) {
-            let card = format!("round{round}");
-            elements.push(
-                ui::card(&card)
-                    .parent("fixtures")
-                    .title(format!("Round {}", round + 1))
-                    .gap("small"),
-            );
+            let card_id = format!("round{round}");
+            let mut card = vtree::card(&card_id)
+                .title(format!("Round {}", round + 1))
+                .gap("small");
             let mut playing = vec![false; t.teams.len()];
             for (k, g) in t.games.iter().enumerate().filter(|(_, g)| g.round == round) {
                 playing[g.home as usize] = true;
@@ -640,36 +622,20 @@ impl Tournaments {
                         Some([h, a]) => format!("{}  {h} – {a}  {}", team(g.home), team(g.away)),
                         None => format!("{}  vs  {}", team(g.home), team(g.away)),
                     };
-                    elements.push(ui::text(id).parent(&card).text(line));
+                    card = card.child(vtree::text(id).text(line));
                     continue;
                 }
-                elements.push(ui::row(&id).parent(&card).wrap(true));
-                elements.push(
-                    ui::text(format!("{id}_home"))
-                        .parent(&id)
-                        .text(team(g.home)),
-                );
-                elements.push(
-                    ui::input(format!("{id}_h"))
-                        .parent(&id)
+                let mut row = vtree::row(&id).wrap(true).children([
+                    vtree::text(format!("{id}_home")).text(team(g.home)),
+                    vtree::input(format!("{id}_h"))
                         .variant("number")
                         .bind(format!("score.{id}.h")),
-                );
-                elements.push(ui::text(format!("{id}_dash")).parent(&id).text("–"));
-                elements.push(
-                    ui::input(format!("{id}_a"))
-                        .parent(&id)
+                    vtree::text(format!("{id}_dash")).text("–"),
+                    vtree::input(format!("{id}_a"))
                         .variant("number")
                         .bind(format!("score.{id}.a")),
-                );
-                elements.push(
-                    ui::text(format!("{id}_away"))
-                        .parent(&id)
-                        .text(team(g.away)),
-                );
-                elements.push(
-                    ui::button(format!("{id}_save"))
-                        .parent(&id)
+                    vtree::text(format!("{id}_away")).text(team(g.away)),
+                    vtree::button(format!("{id}_save"))
                         .label(if g.score.is_some() { "Update" } else { "Save" })
                         .variant(if g.score.is_some() {
                             "plain"
@@ -677,26 +643,26 @@ impl Tournaments {
                             "primary"
                         })
                         .on_press(Handler::action("score").payload(k)),
-                );
+                ]);
                 if g.score.is_some() {
-                    elements.push(
-                        ui::badge(format!("{id}_done"))
-                            .parent(&id)
+                    row = row.child(
+                        vtree::badge(format!("{id}_done"))
                             .variant("success")
                             .text("Played"),
                     );
                 }
+                card = card.child(row);
             }
             if let Some(bye) = playing.iter().position(|p| !p) {
-                elements.push(
-                    ui::text(format!("{card}_bye"))
-                        .parent(&card)
+                card = card.child(
+                    vtree::text(format!("{card_id}_bye"))
                         .variant("caption")
                         .text(format!("Bye: {}", t.teams[bye])),
                 );
             }
+            cards.push(card);
         }
-        Self::replace(out, &mut self.fixtures, elements);
+        Self::replace(out, "fixtures", &mut self.fixtures, cards);
     }
 
     /// Changes the tournament open with an edit link, if `change` says so,

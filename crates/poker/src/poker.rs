@@ -23,7 +23,8 @@ use crate::store::{
     WriteTx,
 };
 use hyperb_core::identity::PublicKey;
-use hypereffect::{Action, App, Element, Handler, Metadata, Outbox, Value, cel, json, ui};
+use hypereffect::vtree::{self, Node};
+use hypereffect::{Action, App, Handler, Metadata, Outbox, Value, cel, json, ui};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -242,10 +243,10 @@ pub struct Poker {
     /// The round the vote input was last filled for, so that a refresh does
     /// not wipe a number being typed.
     shown_round: Option<u32>,
-    /// The elements sent last, so that a refresh re-sends only what changed.
-    mine: Vec<Element>,
-    players: Vec<Element>,
-    history: Vec<Element>,
+    /// The trees sent last, so that a refresh re-sends only what changed.
+    mine: Vec<Node>,
+    players: Vec<Node>,
+    history: Vec<Node>,
     /// The `room` signal last shown, so that an unchanged room stays silent.
     shown_room: Option<Value>,
 }
@@ -273,27 +274,17 @@ impl Poker {
         self.viewer.to_string()
     }
 
-    // New elements land at the end of their parent, which is where they
-    // belong, and later ones in a list keep their order, so sending only the
-    // ones that changed is enough whatever shifts the id numbering.
-    fn replace(out: &mut Outbox, shown: &mut Vec<Element>, new: Vec<Element>) {
-        for e in &new {
-            if !shown.contains(e) {
-                out.element(e.clone());
-            }
-        }
-        for e in shown.iter() {
-            if !new.iter().any(|n| n.id == e.id) {
-                out.remove(e.id.as_str());
-            }
-        }
+    /// Turns the children of `mount` from `shown` into `new`, sending only
+    /// the difference.
+    fn replace(out: &mut Outbox, mount: &str, shown: &mut Vec<Node>, new: Vec<Node>) {
+        out.extend(vtree::diff_into(Some(mount), shown, &new));
         *shown = new;
     }
 
     /// Switches to `view`, dropping what belonged to the one before.
     fn show(&mut self, out: &mut Outbox, view: View) {
-        Self::replace(out, &mut self.players, Vec::new());
-        Self::replace(out, &mut self.history, Vec::new());
+        Self::replace(out, "players", &mut self.players, Vec::new());
+        Self::replace(out, "history", &mut self.history, Vec::new());
         self.open = None;
         self.shown_round = None;
         self.shown_room = None;
@@ -323,11 +314,9 @@ impl Poker {
         });
         let buttons = mine
             .iter()
-            .enumerate()
-            .map(|(k, r)| {
+            .map(|r| {
                 let n = r.players.len();
-                ui::button(format!("mine_{k}"))
-                    .parent("mine_list")
+                vtree::button(format!("mine_{}", r.id.0))
                     .label(format!(
                         "{} · {n} player{}",
                         r.title,
@@ -337,7 +326,7 @@ impl Poker {
             })
             .collect();
         out.signal(json!({"has_mine": !mine.is_empty()}));
-        Self::replace(out, &mut self.mine, buttons);
+        Self::replace(out, "mine_list", &mut self.mine, buttons);
     }
 
     fn missing(&mut self, out: &mut Outbox) {
@@ -482,27 +471,28 @@ impl Poker {
 
         // Who is in, and what they voted once it is revealed. Votes of people
         // who left since are shown too.
-        let mut elements = Vec::new();
+        let mut rows = Vec::new();
         let mut row = |id: String, name: String, badge: (String, &str), remove: Option<u32>| {
-            elements.push(ui::row(&id).parent("players").justify("between").wrap(true));
-            elements.push(ui::text(format!("{id}_name")).parent(&id).text(name));
-            let right = format!("{id}_right");
-            elements.push(ui::row(&right).parent(&id).gap("small"));
-            elements.push(
-                ui::badge(format!("{id}_vote"))
-                    .parent(&right)
+            let mut right = vtree::row(format!("{id}_right")).gap("small").child(
+                vtree::badge(format!("{id}_vote"))
                     .variant(badge.1)
                     .text(badge.0),
             );
             if let Some(pid) = remove {
-                elements.push(
-                    ui::button(format!("{id}_remove"))
-                        .parent(&right)
+                right = right.child(
+                    vtree::button(format!("{id}_remove"))
                         .label("Remove")
                         .variant("plain")
                         .on_press(Handler::action("remove").payload(pid)),
                 );
             }
+            rows.push(
+                vtree::row(&id)
+                    .justify("between")
+                    .wrap(true)
+                    .child(vtree::text(format!("{id}_name")).text(name))
+                    .child(right),
+            );
         };
         for p in &r.players {
             let mut name = named(&p.name, &p.key);
@@ -523,30 +513,29 @@ impl Poker {
                 .votes
                 .iter()
                 .filter(|v| !r.players.iter().any(|p| p.key == v.key));
-            for (k, v) in gone.enumerate() {
+            for v in gone {
                 row(
-                    format!("gone{k}"),
+                    format!("gone_{}", v.key),
                     format!("{} (left)", named(&v.name, &v.key)),
                     (number(v.value), "info"),
                     None,
                 );
             }
         }
-        Self::replace(out, &mut self.players, elements);
+        Self::replace(out, "players", &mut self.players, rows);
 
         let lines = r
             .history
             .iter()
-            .enumerate()
-            .map(|(k, h)| {
-                ui::text(format!("past{k}")).parent("history").text(format!(
+            .map(|h| {
+                vtree::text(format!("past{}", h.number)).text(format!(
                     "{}: {}",
                     heading(h.number, &h.topic),
                     h.result
                 ))
             })
             .collect();
-        Self::replace(out, &mut self.history, lines);
+        Self::replace(out, "history", &mut self.history, lines);
     }
 
     /// Changes the open room, if `change` says so, and shows how it is now.

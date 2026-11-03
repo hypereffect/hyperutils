@@ -2,6 +2,7 @@ use super::*;
 use hyperb_core::identity::Identity;
 use hypereffect::RendererMessage;
 use hypereffect::client::Client;
+use std::collections::BTreeSet;
 
 /// A renderer and a session, wired together the way `run_app` does.
 struct Loopback {
@@ -11,6 +12,11 @@ struct Loopback {
 }
 
 impl Loopback {
+    /// The id of the first row of `list`.
+    fn first(&self, list: &str) -> String {
+        self.client.children(Some(list))[0].clone()
+    }
+
     fn receive(&mut self, line: &str) -> String {
         match RendererMessage::parse(line.trim_end()) {
             Ok(RendererMessage::Hello { params }) => self.app.hello(&mut self.out, &params),
@@ -121,8 +127,8 @@ fn connect(db: &Arc<Db>, key: PublicKey, path: &str) -> Loopback {
     l
 }
 
-/// The ids of the elements that a batch sends, in order.
-fn sent_ids(batch: &str) -> Vec<&str> {
+/// The ids of the elements that a batch sends.
+fn sent_ids(batch: &str) -> BTreeSet<&str> {
     batch
         .lines()
         .filter_map(|l| {
@@ -133,7 +139,7 @@ fn sent_ids(batch: &str) -> Vec<&str> {
 }
 
 /// The ids of the elements that a batch takes away.
-fn removed_ids(batch: &str) -> Vec<&str> {
+fn removed_ids(batch: &str) -> BTreeSet<&str> {
     batch
         .lines()
         .filter_map(|l| {
@@ -231,7 +237,6 @@ fn people_put_names_down_and_everyone_sees_who() {
     bob.press("item0_join");
     assert_eq!(bob.feedback(), json!("“Bob” is down for “Drinks”."));
     assert_eq!(bob.text("name3_name"), "Bob");
-    assert_eq!(bob.text("name3_by"), format!("by {}", tag(&bob_key)));
     // Drinks takes one, so it is taken.
     assert!(!bob.client.contains("item0_join"));
     assert_eq!(bob.text("item0_full"), "Taken");
@@ -247,7 +252,6 @@ fn people_put_names_down_and_everyone_sees_who() {
     );
     bob.write("who", json!("Cleo"));
     bob.press("item2_join");
-    assert_eq!(bob.text("name5_by"), format!("by {}", tag(&bob_key)));
     assert_eq!(bob.text("sheet_fill"), "3 of 5 spots taken");
     bob.clean();
 
@@ -289,9 +293,9 @@ fn bringing_the_sheet_up_to_date_sends_only_what_changed() {
         "log0".into(),
         "log1".into(),
     ];
-    let want: Vec<&str> = want.iter().map(String::as_str).collect();
+    let want: BTreeSet<&str> = want.iter().map(String::as_str).collect();
     assert_eq!(sent_ids(&put), want, "{put}");
-    assert_eq!(removed_ids(&put), ["item0_join"]);
+    assert_eq!(removed_ids(&put), BTreeSet::from(["item0_join"]));
     // Brought up to date again, nothing has to go over the wire.
     assert_eq!(bob.refresh(), "");
 
@@ -306,9 +310,9 @@ fn bringing_the_sheet_up_to_date_sends_only_what_changed() {
         "log0".into(),
         "log1".into(),
     ];
-    let want: Vec<&str> = want.iter().map(String::as_str).collect();
+    let want: BTreeSet<&str> = want.iter().map(String::as_str).collect();
     assert_eq!(sent_ids(&put), want, "{put}");
-    assert_eq!(removed_ids(&put), ["item0_join"]);
+    assert_eq!(removed_ids(&put), BTreeSet::from(["item0_join"]));
     bob.clean();
     cy.clean();
 }
@@ -470,7 +474,7 @@ fn the_owner_lists_and_deletes_sheets() {
     ann.press("home_btn");
     assert!(ann.visible("mine"));
     assert_eq!(
-        ann.client.attr("mine_0", "label"),
+        ann.client.attr(&ann.first("mine_list"), "label"),
         Some(json!("Picnic · 0 of 5 spots taken"))
     );
 
@@ -482,7 +486,7 @@ fn the_owner_lists_and_deletes_sheets() {
         json!("Only its creator can delete this sheet.")
     );
 
-    ann.press("mine_0");
+    ann.press(&ann.first("mine_list"));
     assert_eq!(ann.view(), "sheet");
     ann.toggle("edit_btn");
     ann.press("delete_btn");

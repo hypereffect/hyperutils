@@ -312,7 +312,7 @@ dependencies = [
  "chrono",
  "clap",
  "hyperb-core",
- "hypereffect",
+ "hypereffect 0.6.1",
  "hyperserve",
  "orangedb",
  "serde",
@@ -418,7 +418,7 @@ dependencies = [
  "cuid2",
  "getrandom 0.2.17",
  "hyperb-core",
- "hypereffect",
+ "hypereffect 0.6.1",
  "hyperserve",
  "orangedb",
  "serde",
@@ -1101,7 +1101,7 @@ dependencies = [
  "clap",
  "cuid2",
  "hyperb-core",
- "hypereffect",
+ "hypereffect 0.6.1",
  "hyperserve",
  "orangedb",
  "serde",
@@ -1503,7 +1503,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.2.17",
  "hex",
- "hypereffect",
+ "hypereffect 0.5.0",
  "iroh",
  "reqwest",
  "rustls",
@@ -1527,6 +1527,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hypereffect"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d07ffec93e04e434af4cf14672e959276cd85c8c8e669bd8659ee5b2f5a866c4"
+dependencies = [
+ "cel",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hyperserve"
 version = "0.1.0"
 dependencies = [
@@ -1537,7 +1548,7 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "hyperb-core",
- "hypereffect",
+ "hypereffect 0.6.1",
  "iroh",
  "rustls",
  "tokio",
@@ -2003,7 +2014,7 @@ dependencies = [
  "clap",
  "cuid2",
  "hyperb-core",
- "hypereffect",
+ "hypereffect 0.6.1",
  "hyperserve",
  "orangedb",
  "serde",
@@ -2115,7 +2126,7 @@ dependencies = [
  "clap",
  "getrandom 0.2.17",
  "hyperb-core",
- "hypereffect",
+ "hypereffect 0.6.1",
  "hyperserve",
  "orangedb",
  "tempfile",
@@ -2935,7 +2946,7 @@ dependencies = [
  "clap",
  "cuid2",
  "hyperb-core",
- "hypereffect",
+ "hypereffect 0.6.1",
  "hyperserve",
  "orangedb",
  "serde",
@@ -3579,7 +3590,7 @@ dependencies = [
  "clap",
  "cuid2",
  "hyperb-core",
- "hypereffect",
+ "hypereffect 0.6.1",
  "hyperserve",
  "orangedb",
  "serde",
@@ -4021,7 +4032,7 @@ dependencies = [
  "clap",
  "cuid2",
  "hyperb-core",
- "hypereffect",
+ "hypereffect 0.6.1",
  "hyperserve",
  "orangedb",
  "serde",

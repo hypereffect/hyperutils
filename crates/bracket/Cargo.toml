@@ -17,4 +17,4 @@ cuid2 = "0.1"
 getrandom = "0.2"
 
 [dev-dependencies]
-hypereffect = { workspace = true, features = ["client"] }
+hypereffect.workspace = true

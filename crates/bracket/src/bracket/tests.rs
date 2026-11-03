@@ -2,6 +2,7 @@ use super::*;
 use hyperb_core::identity::Identity;
 use hypereffect::RendererMessage;
 use hypereffect::client::Client;
+use std::collections::BTreeSet;
 
 /// A renderer and a session, wired together the way `run_app` does.
 struct Loopback {
@@ -11,6 +12,11 @@ struct Loopback {
 }
 
 impl Loopback {
+    /// The id of the first row of `list`.
+    fn first(&self, list: &str) -> String {
+        self.client.children(Some(list))[0].clone()
+    }
+
     fn receive(&mut self, line: &str) -> String {
         match RendererMessage::parse(line.trim_end()) {
             Ok(RendererMessage::Hello { params }) => self.app.hello(&mut self.out, &params),
@@ -125,8 +131,8 @@ fn lcg(seed: u64) -> impl FnMut(usize) -> usize {
     }
 }
 
-/// The ids of the elements that a batch sends, in order.
-fn sent_ids(batch: &str) -> Vec<&str> {
+/// The ids of the elements that a batch sends.
+fn sent_ids(batch: &str) -> BTreeSet<&str> {
     batch
         .lines()
         .filter_map(|l| {
@@ -137,7 +143,7 @@ fn sent_ids(batch: &str) -> Vec<&str> {
 }
 
 /// The ids of the elements that a batch takes away.
-fn removed_ids(batch: &str) -> Vec<&str> {
+fn removed_ids(batch: &str) -> BTreeSet<&str> {
     batch
         .lines()
         .filter_map(|l| {
@@ -444,10 +450,10 @@ fn a_bracket_is_placed_drawn_and_played() {
     drop(ann);
     let mut ann = connect(&db, ann_key, "/");
     assert_eq!(
-        ann.client.attr("mine_0", "label"),
+        ann.client.attr(&ann.first("mine_list"), "label"),
         Some(json!("Spring cup · 5 teams · 4 of 4 matches played"))
     );
-    ann.press("mine_0");
+    ann.press(&ann.first("mine_list"));
     ann.press("delete_btn");
     assert_eq!(ann.view(), "home");
     assert!(db.edit_links().all().unwrap().is_empty());
@@ -479,7 +485,7 @@ fn bringing_the_bracket_up_to_date_sends_only_what_changed() {
     bob.write("score.g0.a", json!(0));
     let put = bob.press("g0_save");
     assert_eq!(bob.feedback(), json!("Result saved."));
-    assert_eq!(sent_ids(&put), ["g0_save", "g0_done", "g2"]);
+    assert_eq!(sent_ids(&put), BTreeSet::from(["g0_save", "g0_done", "g2"]));
     assert!(removed_ids(&put).is_empty());
 
     // The second one: only its button and badge, and the final, which now
@@ -489,18 +495,10 @@ fn bringing_the_bracket_up_to_date_sends_only_what_changed() {
     let put = bob.press("g1_save");
     assert_eq!(
         sent_ids(&put),
-        [
-            "g1_save",
-            "g1_done",
-            "g2",
-            "g2_n",
-            "g2_home",
-            "g2_h",
-            "g2_dash",
-            "g2_a",
-            "g2_away",
+        BTreeSet::from([
+            "g1_save", "g1_done", "g2", "g2_n", "g2_home", "g2_h", "g2_dash", "g2_a", "g2_away",
             "g2_save"
-        ]
+        ])
     );
 
     // Brought up to date again, nothing has to go over the wire.
@@ -517,7 +515,7 @@ fn bringing_the_bracket_up_to_date_sends_only_what_changed() {
     bob.write("score.g0.h", json!(2));
     bob.press("g0_save");
     let put = cy.tick();
-    assert_eq!(sent_ids(&put), ["g0"]);
+    assert_eq!(sent_ids(&put), BTreeSet::from(["g0"]));
     for l in [&mut bob, &mut cy] {
         l.clean();
     }

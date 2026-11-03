@@ -15,5 +15,5 @@ getrandom = "0.2"
 orangedb.workspace = true
 
 [dev-dependencies]
-hypereffect = { workspace = true, features = ["client"] }
+hypereffect.workspace = true
 tempfile = "3"

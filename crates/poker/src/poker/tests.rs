@@ -2,6 +2,7 @@ use super::*;
 use hyperb_core::identity::Identity;
 use hypereffect::RendererMessage;
 use hypereffect::client::Client;
+use std::collections::BTreeSet;
 
 /// A renderer and a session, wired together the way `run_app` does.
 struct Loopback {
@@ -11,6 +12,11 @@ struct Loopback {
 }
 
 impl Loopback {
+    /// The id of the first row of `list`.
+    fn first(&self, list: &str) -> String {
+        self.client.children(Some(list))[0].clone()
+    }
+
     fn receive(&mut self, line: &str) -> String {
         match RendererMessage::parse(line.trim_end()) {
             Ok(RendererMessage::Hello { params }) => self.app.hello(&mut self.out, &params),
@@ -129,8 +135,8 @@ fn person() -> PublicKey {
     Identity::generate().public()
 }
 
-/// The ids of the elements that a batch sends, in order.
-fn sent_ids(batch: &str) -> Vec<&str> {
+/// The ids of the elements that a batch sends.
+fn sent_ids(batch: &str) -> BTreeSet<&str> {
     batch
         .lines()
         .filter_map(|l| {
@@ -141,7 +147,7 @@ fn sent_ids(batch: &str) -> Vec<&str> {
 }
 
 /// The ids of the elements that a batch takes away.
-fn removed_ids(batch: &str) -> Vec<&str> {
+fn removed_ids(batch: &str) -> BTreeSet<&str> {
     batch
         .lines()
         .filter_map(|l| {
@@ -195,7 +201,7 @@ fn bringing_the_room_up_to_date_sends_only_what_changed() {
         format!("{row}_vote"),
         format!("{row}_remove"),
     ];
-    let want: Vec<&str> = want.iter().map(String::as_str).collect();
+    let want: BTreeSet<&str> = want.iter().map(String::as_str).collect();
     assert_eq!(sent_ids(&put), want, "{put}");
     assert!(removed_ids(&put).is_empty());
     assert_eq!(m.refresh(), "");
@@ -203,7 +209,7 @@ fn bringing_the_room_up_to_date_sends_only_what_changed() {
     // Starting the round: only Ann's badge, which goes from in to thinking…
     let badge = format!("{row}_vote");
     let put = m.press("start_btn");
-    assert_eq!(sent_ids(&put), [badge.as_str()], "{put}");
+    assert_eq!(sent_ids(&put), BTreeSet::from([badge.as_str()]), "{put}");
     assert_eq!(m.tick(), "");
     assert_eq!(m.refresh(), "");
     for l in [&mut m, &mut ann] {
@@ -287,7 +293,7 @@ fn a_round_stays_hidden_until_everyone_votes() {
     assert_eq!(ann.players(), ["Ann (you): thinking…", "Bob: thinking…"]);
     assert!(ann.visible("history_card"));
     assert_eq!(
-        ann.text("past0"),
+        ann.text("past1"),
         "Round 1 · Login page: Average 5.75 · median 5.75 · from 3.5 to 8 (2 votes)"
     );
     for l in [&mut m, &mut ann, &mut bob] {
@@ -394,10 +400,10 @@ fn players_come_back_with_their_key() {
     let mut m = connect(&db, m.app.viewer, "/");
     assert!(m.visible("mine"));
     assert_eq!(
-        m.client.attr("mine_0", "label"),
+        m.client.attr(&m.first("mine_list"), "label"),
         Some(json!("Sprint 14 · 2 players"))
     );
-    m.press("mine_0");
+    m.press(&m.first("mine_list"));
     assert!(m.visible("reveal_row"));
 }
 

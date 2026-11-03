@@ -16,7 +16,8 @@
 
 use crate::store::{self, Change, Db, Item, Name, Owner, OwnerKey, Sheet, SheetId, WriteTx};
 use hyperb_core::identity::PublicKey;
-use hypereffect::{Action, App, Element, Handler, Metadata, Outbox, Value, cel, json, ui};
+use hypereffect::vtree::{self, Node};
+use hypereffect::{Action, App, Handler, Metadata, Outbox, Value, cel, json, ui};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -262,10 +263,10 @@ pub struct Sheets {
     shown_items: BTreeMap<u32, (String, Option<u32>)>,
     /// The title and description in their edit inputs, likewise.
     shown_details: Option<(String, String)>,
-    /// The elements sent last, so that a refresh re-sends only what changed.
-    mine: Vec<Element>,
-    items: Vec<Element>,
-    log: Vec<Element>,
+    /// The trees sent last, so that a refresh re-sends only what changed.
+    mine: Vec<Node>,
+    items: Vec<Node>,
+    log: Vec<Node>,
     /// The `sheet` signal last shown, so that an unchanged sheet stays silent.
     shown_sheet: Option<Value>,
 }
@@ -294,27 +295,17 @@ impl Sheets {
         self.viewer.to_string()
     }
 
-    // New elements land at the end of their parent, which is where they
-    // belong, and later ones in a list keep their order, so sending only the
-    // ones that changed is enough whatever shifts the id numbering.
-    fn replace(out: &mut Outbox, shown: &mut Vec<Element>, new: Vec<Element>) {
-        for e in &new {
-            if !shown.contains(e) {
-                out.element(e.clone());
-            }
-        }
-        for e in shown.iter() {
-            if !new.iter().any(|n| n.id == e.id) {
-                out.remove(e.id.as_str());
-            }
-        }
+    /// Turns the children of `mount` from `shown` into `new`, sending only
+    /// the difference.
+    fn replace(out: &mut Outbox, mount: &str, shown: &mut Vec<Node>, new: Vec<Node>) {
+        out.extend(vtree::diff_into(Some(mount), shown, &new));
         *shown = new;
     }
 
     /// Switches to `view`, dropping what belonged to the one before.
     fn show(&mut self, out: &mut Outbox, view: View) {
-        Self::replace(out, &mut self.items, Vec::new());
-        Self::replace(out, &mut self.log, Vec::new());
+        Self::replace(out, "items", &mut self.items, Vec::new());
+        Self::replace(out, "log", &mut self.log, Vec::new());
         self.open = None;
         self.shown_items.clear();
         self.shown_details = None;
@@ -345,16 +336,14 @@ impl Sheets {
         });
         let buttons = mine
             .iter()
-            .enumerate()
-            .map(|(k, s)| {
-                ui::button(format!("mine_{k}"))
-                    .parent("mine_list")
+            .map(|s| {
+                vtree::button(format!("mine_{}", s.id.0))
                     .label(format!("{} · {}", s.title, fill(s).0))
                     .on_press(Handler::action("open").payload(s.id.0.as_str()))
             })
             .collect();
         out.signal(json!({"has_mine": !mine.is_empty()}));
-        Self::replace(out, &mut self.mine, buttons);
+        Self::replace(out, "mine_list", &mut self.mine, buttons);
     }
 
     fn missing(&mut self, out: &mut Outbox) {
@@ -487,17 +476,9 @@ impl Sheets {
             }
         }
 
-        let mut elements = Vec::new();
+        let mut cards = Vec::new();
         for i in &s.items {
             let card = format!("item{}", i.id);
-            elements.push(
-                ui::card(&card)
-                    .parent("items")
-                    .title(i.label.as_str())
-                    .gap("small"),
-            );
-            let head = format!("{card}_head");
-            elements.push(ui::row(&head).parent(&card).justify("between").wrap(true));
             let n = i.names.len();
             let (count, variant) = match i.capacity {
                 Some(c) => (
@@ -506,89 +487,80 @@ impl Sheets {
                 ),
                 None => (format!("{n}, no limit"), "info"),
             };
-            elements.push(
-                ui::badge(format!("{card}_count"))
-                    .parent(&head)
-                    .variant(variant)
-                    .text(count),
-            );
-            if i.is_full(MAX_NAMES) {
-                elements.push(
-                    ui::text(format!("{card}_full"))
-                        .parent(&head)
+            let head = vtree::row(format!("{card}_head"))
+                .justify("between")
+                .wrap(true)
+                .child(
+                    vtree::badge(format!("{card}_count"))
+                        .variant(variant)
+                        .text(count),
+                )
+                .child(if i.is_full(MAX_NAMES) {
+                    vtree::text(format!("{card}_full"))
                         .variant("caption")
-                        .text("Taken"),
-                );
-            } else {
-                elements.push(
-                    ui::button(format!("{card}_join"))
-                        .parent(&head)
+                        .text("Taken")
+                } else {
+                    vtree::button(format!("{card}_join"))
                         .label("Put my name down")
                         .variant("primary")
                         .disabled(cel("s.who == ''"))
-                        .on_press(Handler::action("join").payload(i.id)),
-                );
-            }
-            let list = format!("{card}_names");
-            elements.push(ui::list(&list).parent(&card).empty("Nobody yet."));
-            for name in &i.names {
+                        .on_press(Handler::action("join").payload(i.id))
+                });
+            let names = i.names.iter().map(|name| {
                 let row = format!("name{}", name.id);
-                elements.push(ui::row(&row).parent(&list).wrap(true));
-                elements.push(
-                    ui::text(format!("{row}_name"))
-                        .parent(&row)
-                        .text(name.name.as_str()),
-                );
+                let line = vtree::row(&row)
+                    .wrap(true)
+                    .child(vtree::text(format!("{row}_name")).text(name.name.as_str()));
                 if name.key == me || is_owner {
-                    elements.push(
-                        ui::button(format!("{row}_leave"))
-                            .parent(&row)
+                    line.child(
+                        vtree::button(format!("{row}_leave"))
                             .label("Take off")
                             .variant("plain")
                             .on_press(Handler::action("leave").payload(name.id)),
-                    );
+                    )
+                } else {
+                    line
                 }
-            }
+            });
+            let mut node = vtree::card(&card)
+                .title(i.label.as_str())
+                .gap("small")
+                .child(head)
+                .child(
+                    vtree::list(format!("{card}_names"))
+                        .empty("Nobody yet.")
+                        .children(names),
+                );
             if is_owner {
                 let edit = format!("{card}_edit");
                 let at = format!("edit.i{}", i.id);
-                elements.push(
-                    ui::row(&edit)
-                        .parent(&card)
+                node = node.child(
+                    vtree::row(&edit)
                         .wrap(true)
                         .align("end")
-                        .visible(cel("s._editing")),
-                );
-                elements.push(
-                    ui::input(format!("{edit}_label"))
-                        .parent(&edit)
-                        .label("Item")
-                        .bind(format!("{at}.label")),
-                );
-                elements.push(
-                    ui::input(format!("{edit}_cap"))
-                        .parent(&edit)
-                        .label("How many")
-                        .variant("number")
-                        .placeholder("No limit")
-                        .bind(format!("{at}.cap")),
-                );
-                elements.push(
-                    ui::button(format!("{edit}_save"))
-                        .parent(&edit)
-                        .label("Save")
-                        .on_press(Handler::action("save_item").payload(i.id)),
-                );
-                elements.push(
-                    ui::button(format!("{edit}_remove"))
-                        .parent(&edit)
-                        .label("Remove item")
-                        .variant("failure")
-                        .on_press(Handler::action("remove_item").payload(i.id)),
+                        .visible(cel("s._editing"))
+                        .children([
+                            vtree::input(format!("{edit}_label"))
+                                .label("Item")
+                                .bind(format!("{at}.label")),
+                            vtree::input(format!("{edit}_cap"))
+                                .label("How many")
+                                .variant("number")
+                                .placeholder("No limit")
+                                .bind(format!("{at}.cap")),
+                            vtree::button(format!("{edit}_save"))
+                                .label("Save")
+                                .on_press(Handler::action("save_item").payload(i.id)),
+                            vtree::button(format!("{edit}_remove"))
+                                .label("Remove item")
+                                .variant("failure")
+                                .on_press(Handler::action("remove_item").payload(i.id)),
+                        ]),
                 );
             }
+            cards.push(node);
         }
-        Self::replace(out, &mut self.items, elements);
+        Self::replace(out, "items", &mut self.items, cards);
 
         let now = store::now();
         let lines = s
@@ -596,7 +568,7 @@ impl Sheets {
             .iter()
             .enumerate()
             .map(|(k, c)| {
-                ui::text(format!("log{k}")).parent("log").text(format!(
+                vtree::text(format!("log{k}")).text(format!(
                     "{} {} · {}",
                     c.by,
                     c.what,
@@ -604,7 +576,7 @@ impl Sheets {
                 ))
             })
             .collect();
-        Self::replace(out, &mut self.log, lines);
+        Self::replace(out, "log", &mut self.log, lines);
     }
 
     /// Changes the open sheet, if `change` says so, and shows how it is now.
