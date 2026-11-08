@@ -1,0 +1,23 @@
+[package]
+name = "chat"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+description = "A chat server for hyperb, open or invite-only: rooms on the left, the latest messages of the one picked on the right, over HTTPS and iroh"
+
+[dependencies]
+hyperserve = { workspace = true, features = ["iroh"] }
+hyperb-core.workspace = true
+hypereffect.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "signal"] }
+orangedb.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap.workspace = true
+getrandom = "0.2"
+base64 = "0.22"
+
+[dev-dependencies]
+hypereffect.workspace = true
+# The renderers' own session, for the end-to-end test.
+hyperb-core = { workspace = true, features = ["net"] }
+serde_json.workspace = true

@@ -37,3 +37,7 @@ poker *args:
 # Run the judged contests on 127.0.0.1:8408.
 judging *args:
     cargo run --release -p judging -- {{args}}
+
+# Run the chat server on 127.0.0.1:8409.
+chat *args:
+    cargo run --release -p chat -- {{args}}

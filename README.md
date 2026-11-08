@@ -23,3 +23,6 @@ Small, deliberately unglamorous tools for the everyday problems.
   organiser chooses to reveal it.
 - **Bulletin board** — an old-school message board for discussions, private
   messages, and live chat.
+- **Chat server** — rooms down the side, messages on the right, live. Run it
+  open to anyone or invite-only; members pick a name and a picture, and can
+  start new rooms.
