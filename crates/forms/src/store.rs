@@ -5,7 +5,6 @@
 //! panic on one: that ends the session it happened in, which runs in its own
 //! task, and nothing else.
 
-use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use schema::*;
@@ -63,7 +62,8 @@ pub mod schema {
 }
 
 /// A question.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[orangedb::embed]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Field {
     /// Stable across edits; answers refer to it.
     pub id: u32,
@@ -74,7 +74,8 @@ pub struct Field {
     pub required: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[orangedb::embed]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Text,
     Paragraph,
@@ -130,7 +131,8 @@ impl Kind {
 }
 
 /// The answer to one field: the text, or the options picked.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[orangedb::embed]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Answer {
     pub field: u32,
     pub values: Vec<String>,

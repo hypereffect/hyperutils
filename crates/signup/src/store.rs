@@ -6,7 +6,6 @@
 //! panic on one: that ends the session it happened in, which runs in its own
 //! task, and nothing else.
 
-use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use schema::*;
@@ -48,7 +47,8 @@ pub mod schema {
 }
 
 /// A role to fill or a thing to bring.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[orangedb::embed]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Item {
     /// Stable across edits; buttons refer to it.
     pub id: u32,
@@ -66,7 +66,8 @@ impl Item {
 }
 
 /// A name put down for an item.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[orangedb::embed]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Name {
     pub id: u32,
     pub name: String,
@@ -77,7 +78,8 @@ pub struct Name {
 }
 
 /// A line of a sheet's history.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[orangedb::embed]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Change {
     /// The tag of the key that made it.
     pub by: String,

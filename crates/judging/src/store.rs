@@ -5,7 +5,6 @@
 //! panic on one: that ends the session it happened in, which runs in its own
 //! task, and nothing else.
 
-use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use schema::*;
@@ -70,7 +69,8 @@ pub mod schema {
 }
 
 /// A judge and the scores they gave.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[orangedb::embed]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Judge {
     pub name: String,
     /// The cuid2 of their link.
@@ -80,7 +80,8 @@ pub struct Judge {
 }
 
 /// The lowest and the highest score a judge can give.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[orangedb::embed]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Scale {
     pub min: u32,
     pub max: u32,

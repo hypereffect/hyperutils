@@ -6,7 +6,6 @@
 //! panic on one: that ends the session it happened in, which runs in its own
 //! task, and nothing else.
 
-use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use schema::*;
@@ -62,7 +61,8 @@ pub mod schema {
 }
 
 /// Someone in a room.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[orangedb::embed]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Player {
     /// Stable for as long as they are in the room; buttons refer to it.
     pub id: u32,
@@ -70,7 +70,8 @@ pub struct Player {
     pub name: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[orangedb::embed]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Round {
     /// 1 for the first round of the room.
     pub number: u32,
@@ -82,7 +83,8 @@ pub struct Round {
     pub revealed: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[orangedb::embed]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Vote {
     pub key: String,
     /// The voter's name when they voted, for when they leave the room.
@@ -91,7 +93,8 @@ pub struct Vote {
 }
 
 /// How a past round ended.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[orangedb::embed]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Summary {
     pub number: u32,
     pub topic: String,

@@ -5,7 +5,6 @@
 //! panic on one: that ends the session it happened in, which runs in its own
 //! task, and nothing else.
 
-use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use schema::*;
@@ -56,7 +55,8 @@ pub mod schema {
 }
 
 /// What a win, a draw and a loss are worth.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[orangedb::embed]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Points {
     pub win: u32,
     pub draw: u32,
@@ -74,7 +74,8 @@ impl Default for Points {
 }
 
 /// A game between two teams, by their index in the tournament's list.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[orangedb::embed]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Game {
     /// Counting from 0.
     pub round: u32,
