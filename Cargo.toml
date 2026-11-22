@@ -7,7 +7,7 @@ version = "0.1.0"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-hyperserve = { path = "crates/hyperserve", version = "0.1.0" }
+hyperserve = "0.1"
 hyperb-core = "0.1"
 hypereffect = "0.6.1"
 iroh = "1.3"

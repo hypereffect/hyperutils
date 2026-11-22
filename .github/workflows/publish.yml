@@ -5,8 +5,8 @@ name: publish
 #
 # Nothing here names a crate: the matrix comes from `cargo metadata`, so a new
 # crate under `crates/` with a `[[bin]]` (or `src/main.rs`) is picked up on the
-# next tag with no workflow change. Crates without a binary (`hyperserve`) are
-# skipped automatically.
+# next tag with no workflow change. Crates without a binary are skipped
+# automatically.
 #
 #   git tag v0.1.0 && git push origin v0.1.0
 
